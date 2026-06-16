@@ -1,0 +1,15 @@
+[package]
+name = "linter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Pinned 2026-06-15 to latest stable releases (see feature 01 plan.md).
+x509-parser = "0.18"
+# RustCrypto `der` crate — independent of x509-parser's asn1-rs/der-parser backend.
+# Kept only for lints that may need RustCrypto DER parsing directly.
+der = "0.8"
+# Pinned to 0.8 to match x509-parser's `oid-registry ^0.8.1` requirement (NOT 0.9).
+oid-registry = "0.8"
+# Bumped to 2 to match x509-parser's own `thiserror ^2.0`.
+thiserror = "2"

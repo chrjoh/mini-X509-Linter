@@ -1,0 +1,14 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "mini-x509-lint"
+path = "src/main.rs"
+
+[dependencies]
+linter = { path = "../linter" }
+# Pinned 2026-06-15 to latest stable releases (see feature 01 plan.md).
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
