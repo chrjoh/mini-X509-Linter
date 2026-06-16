@@ -38,6 +38,13 @@ behaviour against the real binary.
    - Run the registry / formatter over a stable set of `testdata/` fixtures and snapshot
      the **text** output with `insta::assert_snapshot!`. Also snapshot the **JSON** output
      (parse-and-reserialize or `assert_json_snapshot!`) to lock the nested shape.
+   - Add a **`--verbose` text** snapshot over the same fixture set: assert the per-lint listing
+     shows each `lint_id` with its `pass` / `n/a` status under the correct source group, that
+     failing-lint finding lines still appear, and that the collapsed
+     `(N passed, M not applicable)` summary line is **absent** in verbose mode. Snapshot it twice
+     (or compare two runs) to confirm determinism (sorted, no timestamps).
+   - Add a default-mode assertion that the collapsed `(N passed, M not applicable)` summary is
+     still present when `--verbose` is omitted (guards the unchanged default).
    - Output must be deterministic (sorted, no timestamps) — if it is not, that is a bug in
      the formatter to report back, not something to paper over in the test.
 4. `crates/cli/tests/exit_codes.rs` (drive the built binary, e.g. via
@@ -55,6 +62,9 @@ behaviour against the real binary.
 ## Acceptance Criteria
 
 - [ ] Golden text + JSON snapshots committed and stable across runs.
+- [ ] `--verbose` text snapshot lists every lint (`pass`/`n/a` + `lint_id`) under the right
+      source group, keeps failing-finding lines, and omits the collapsed summary; default mode
+      still shows the collapsed summary. Verbose output is deterministic across runs.
 - [ ] Exit-code tests cover the `--fail-on` / `--min-severity` matrix above.
 - [ ] `--chain` test confirms leaf-only linting + chain-context rendering.
 - [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` pass.

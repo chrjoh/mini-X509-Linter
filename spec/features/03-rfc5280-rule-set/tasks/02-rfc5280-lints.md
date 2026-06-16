@@ -2,7 +2,7 @@
 agent: developer
 seq: 2
 title: Implement the six RFC 5280 lints
-status: pending
+status: done
 touches:
   - crates/linter/src/lints/mod.rs
   - crates/linter/src/lints/rfc5280/mod.rs

@@ -127,9 +127,20 @@ fn evaluate(lint: &dyn Lint, cert: &Cert) -> LintOutcome {
 /// This is the single, obvious place lints are wired up. Later features append
 /// their lints here.
 pub fn default_registry() -> Registry {
+    use crate::lints::rfc5280;
+
     Registry::with_lints(vec![
         // --- add new lints here ---
+        // Hygiene (feature 02).
         Box::new(crate::lints::hygiene::NotExpired::new()),
+        // RFC 5280 structural lints (feature 03). Order is deterministic and
+        // matters for the feature 06 golden test — keep it stable.
+        Box::new(rfc5280::VersionIsV3::new()),
+        Box::new(rfc5280::SerialNumberPositive::new()),
+        Box::new(rfc5280::ValidityNotAfterAfterNotBefore::new()),
+        Box::new(rfc5280::BasicConstraintsCriticalOnCa::new()),
+        Box::new(rfc5280::KeyUsagePresentWhenCa::new()),
+        Box::new(rfc5280::SanPresentIfSubjectEmpty::new()),
     ])
 }
 
@@ -455,9 +466,56 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             let cert = sample_cert();
             let outcomes = registry.run(&cert);
 
-            // Expect: the one shipped lint runs and is reported.
+            // Expect: the hygiene lint plus all six RFC 5280 lints are wired in
+            // and reported — one outcome per registered lint.
             assert!(!registry.is_empty());
-            assert!(outcomes.iter().any(|o| o.lint_id == "hygiene_not_expired"));
+            assert_eq!(registry.len(), 7);
+            assert_eq!(outcomes.len(), 7);
+
+            let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
+            for expected in [
+                "hygiene_not_expired",
+                "rfc5280_version_is_v3",
+                "rfc5280_serial_number_positive",
+                "rfc5280_validity_not_after_after_not_before",
+                "rfc5280_basic_constraints_critical_on_ca",
+                "rfc5280_key_usage_present_when_ca",
+                "rfc5280_san_present_if_subject_empty",
+            ] {
+                assert!(
+                    ids.contains(&expected),
+                    "default registry missing lint {expected}; got {ids:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn rfc5280_source_filter_runs_exactly_the_rfc5280_set() {
+            // Setup & Invoke: filtering by RuleSource::Rfc5280 must select the six
+            // RFC 5280 lints and nothing else (e.g. not the hygiene lint).
+            let registry = default_registry();
+            let cert = sample_cert();
+            let outcomes = registry.run_filtered(&cert, &[RuleSource::Rfc5280]);
+
+            // Expect
+            assert_eq!(outcomes.len(), 6);
+            assert!(outcomes.iter().all(|o| o.source == RuleSource::Rfc5280));
+
+            let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
+            for expected in [
+                "rfc5280_version_is_v3",
+                "rfc5280_serial_number_positive",
+                "rfc5280_validity_not_after_after_not_before",
+                "rfc5280_basic_constraints_critical_on_ca",
+                "rfc5280_key_usage_present_when_ca",
+                "rfc5280_san_present_if_subject_empty",
+            ] {
+                assert!(
+                    ids.contains(&expected),
+                    "rfc5280 filter missing lint {expected}; got {ids:?}"
+                );
+            }
+            assert!(!ids.contains(&"hygiene_not_expired"));
         }
 
         #[test]

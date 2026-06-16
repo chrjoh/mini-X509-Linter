@@ -9,12 +9,12 @@ depends_on:
   - 01-polished-text-formatter
 ---
 
-# Task: --fail-on exit codes + --chain flag + multi-cert loading
+# Task: --fail-on exit codes + --chain flag + multi-cert loading + --verbose
 
 ## Goal
 
-Add `--fail-on` (driving the process exit code) and `--chain`, complete PEM-bundle /
-multi-cert input handling, and wire the polished formatter so the CLI is CI-ready.
+Add `--fail-on` (driving the process exit code), `--chain`, and `--verbose`/`-v`, complete
+PEM-bundle / multi-cert input handling, and wire the polished formatter so the CLI is CI-ready.
 
 ## Files Owned (conflict scope)
 
@@ -26,6 +26,10 @@ multi-cert input handling, and wire the polished formatter so the CLI is CI-read
    - `--fail-on <level>` (`ValueEnum`, default `error`) — exit non-zero if any **surfaced**
      finding (after `--min-severity` filtering) is at/above this level.
    - `--chain` — treat multiple inputs / a PEM bundle as a chain.
+   - `--verbose` (`#[arg(long, short = 'v')]`, a `bool` flag) — opt-in per-lint text listing.
+     Confirm no clap short-flag conflict: existing/planned flags (`--format`, `--source`,
+     `--min-severity`, `--fail-on`, `--chain`) are all long-only, and clap's auto short flags are
+     `-h` (help) and `-V` (uppercase, `--version`); lowercase `-v` is free.
 2. Input handling:
    - Accept `<PATH>...` (multiple paths) and PEM bundles with multiple certs.
    - Without `--chain`: lint the leaf (first cert) only, per plan.md.
@@ -38,6 +42,14 @@ multi-cert input handling, and wire the polished formatter so the CLI is CI-read
      flushed) — fail-closed semantics, generic error messages, no panic/stack traces.
 4. Keep `--format`, `--source`, `--min-severity` (from feature 02) working with the new
    flags.
+5. Thread `--verbose` into the text formatter:
+   - Pass the flag into `output::render_text` (and the chain renderer) via the verbosity
+     parameter/enum added in task 01. Default (flag omitted) keeps today's collapsed summary.
+   - `--verbose` affects `--format text` only; `--format json` is unchanged (it already emits
+     every lint). It does **not** affect `--fail-on` / exit-code computation, which stays driven
+     by surfaced findings via `severity_counts`.
+   - Update the module-level doc comment in `main.rs` to document `--verbose`/`-v` alongside the
+     other flags.
 
 ## Acceptance Criteria
 
@@ -46,6 +58,8 @@ multi-cert input handling, and wire the polished formatter so the CLI is CI-read
 - [ ] `--chain` lints the leaf and renders other certs as context.
 - [ ] PEM bundle with multiple certs handled; DER auto-detected.
 - [ ] Exit code computed from existing outcomes, not a second lint run.
+- [ ] `--verbose`/`-v` switches text output to the per-lint listing; omitting it keeps the
+      collapsed summary. The flag does not change JSON output or the exit code.
 - [ ] `cargo clippy --all-targets -- -D warnings` clean.
 
 ## Notes / Dependencies

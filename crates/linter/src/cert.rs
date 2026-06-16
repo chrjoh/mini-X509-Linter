@@ -39,6 +39,65 @@ pub struct Cert {
     der: Vec<u8>,
 }
 
+/// A summary of the certificate serial number's DER INTEGER encoding.
+///
+/// `serial_number_positive` needs to know whether the serial is positive
+/// (RFC 5280 §4.1.2.2: the serial number MUST be a positive integer) and
+/// whether it fits in 20 octets (the same section caps conforming serials at
+/// 20 octets). The summary is derived from the raw DER content octets so the
+/// lint never has to touch `x509-parser` or re-decode the value itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialSummary {
+    /// `true` if the serial encodes the value zero (all content octets zero).
+    pub is_zero: bool,
+    /// `true` if the high bit of the leading content octet is set, i.e. the
+    /// two's-complement DER INTEGER encodes a negative value.
+    pub is_negative: bool,
+    /// The number of content octets in the DER INTEGER (excluding tag/length).
+    pub octet_len: usize,
+}
+
+/// A read-only view of the certificate's Basic Constraints extension.
+///
+/// Carries only what `basic_constraints_critical_on_ca` needs: the `cA`
+/// boolean and whether the extension is marked critical (RFC 5280 §4.2.1.9,
+/// which requires conforming CAs to mark Basic Constraints critical).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BasicConstraintsView {
+    /// The `cA` boolean from the extension.
+    pub is_ca: bool,
+    /// The `pathLenConstraint` value, if present.
+    pub path_len: Option<u32>,
+    /// `true` if the extension is marked critical.
+    pub critical: bool,
+}
+
+/// A read-only view of the certificate's Key Usage extension.
+///
+/// Carries only what `key_usage_present_when_ca` needs: the `keyCertSign` bit
+/// (RFC 5280 §4.2.1.3) and whether the extension is marked critical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyUsageView {
+    /// `true` if the `keyCertSign` bit (bit 5) is asserted.
+    pub key_cert_sign: bool,
+    /// `true` if the extension is marked critical.
+    pub critical: bool,
+}
+
+/// A read-only view of the certificate's Subject Alternative Name extension.
+///
+/// Carries only what `san_present_if_subject_empty` needs: whether the
+/// extension is critical and whether it contains any general names
+/// (RFC 5280 §4.2.1.6, which requires SAN to be critical when the subject DN
+/// is empty). Full entry enumeration is deferred to a later feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SanView {
+    /// `true` if the extension is marked critical.
+    pub critical: bool,
+    /// `true` if the extension contains no general names.
+    pub is_empty: bool,
+}
+
 impl Cert {
     /// Parses a single certificate from DER-encoded bytes.
     ///
@@ -137,6 +196,163 @@ impl Cert {
         self.with_parsed(|c| c.validity().not_after)
     }
 
+    /// The certificate's version number as encoded in the DER (`0` for v1,
+    /// `1` for v2, `2` for v3).
+    ///
+    /// RFC 5280 §4.1.2.1 ties the version to the presence of extensions, so
+    /// `version_is_v3` pairs this with [`has_extensions`](Cert::has_extensions).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn version(&self) -> Result<u32, CertError> {
+        self.with_parsed(|c| c.version().0)
+    }
+
+    /// Whether the certificate carries any X.509v3 extensions.
+    ///
+    /// Per RFC 5280 §4.1.2.1, extensions may appear only in v3 certificates,
+    /// which is what `version_is_v3` enforces.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn has_extensions(&self) -> Result<bool, CertError> {
+        self.with_parsed(|c| !c.extensions().is_empty())
+    }
+
+    /// The raw DER INTEGER content octets of the certificate serial number,
+    /// big-endian, exactly as encoded (no leading-zero stripping).
+    ///
+    /// These are the value octets surfaced by `x509-parser`'s `raw_serial`,
+    /// i.e. the content of the DER INTEGER without its tag or length. The
+    /// sign and octet count follow directly from them; see
+    /// [`serial_summary`](Cert::serial_summary) for the derived view that
+    /// `serial_number_positive` consumes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn serial_der_octets(&self) -> Result<Vec<u8>, CertError> {
+        self.with_parsed(|c| c.raw_serial().to_vec())
+    }
+
+    /// A summary of the serial number's DER INTEGER encoding (zero, sign, and
+    /// octet count).
+    ///
+    /// Derived from [`serial_der_octets`](Cert::serial_der_octets):
+    /// `is_negative` reflects the high bit of the leading content octet,
+    /// `is_zero` reflects all-zero content, and `octet_len` is the content
+    /// length used for the RFC 5280 §4.1.2.2 20-octet ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn serial_summary(&self) -> Result<SerialSummary, CertError> {
+        let octets = self.serial_der_octets()?;
+        Ok(SerialSummary {
+            is_zero: octets.iter().all(|&b| b == 0),
+            is_negative: octets.first().is_some_and(|&b| b & 0x80 != 0),
+            octet_len: octets.len(),
+        })
+    }
+
+    /// The Basic Constraints extension as a [`BasicConstraintsView`], or
+    /// `None` if the extension is absent.
+    ///
+    /// Relied on by `basic_constraints_critical_on_ca` (RFC 5280 §4.2.1.9). A
+    /// malformed or duplicated extension is treated as absent (`None`) rather
+    /// than surfaced as an error, so the lint never panics on odd input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn basic_constraints(&self) -> Result<Option<BasicConstraintsView>, CertError> {
+        self.with_parsed(|c| {
+            c.basic_constraints()
+                .ok()
+                .flatten()
+                .map(|ext| BasicConstraintsView {
+                    is_ca: ext.value.ca,
+                    path_len: ext.value.path_len_constraint,
+                    critical: ext.critical,
+                })
+        })
+    }
+
+    /// Whether the certificate is a CA (`basicConstraints cA = TRUE`).
+    ///
+    /// Convenience predicate for the CA-only lints' `applies()` checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn is_ca(&self) -> Result<bool, CertError> {
+        Ok(self.basic_constraints()?.is_some_and(|bc| bc.is_ca))
+    }
+
+    /// The Key Usage extension as a [`KeyUsageView`], or `None` if the
+    /// extension is absent.
+    ///
+    /// Relied on by `key_usage_present_when_ca` (RFC 5280 §4.2.1.3). A
+    /// malformed or duplicated extension is treated as absent (`None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn key_usage(&self) -> Result<Option<KeyUsageView>, CertError> {
+        self.with_parsed(|c| {
+            c.key_usage().ok().flatten().map(|ext| KeyUsageView {
+                key_cert_sign: ext.value.key_cert_sign(),
+                critical: ext.critical,
+            })
+        })
+    }
+
+    /// Whether the subject distinguished name is empty (contains no RDNs).
+    ///
+    /// Per RFC 5280 §4.1.2.6 a certificate may carry an empty subject only if
+    /// it supplies a Subject Alternative Name, which `san_present_if_subject_empty`
+    /// enforces.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_is_empty(&self) -> Result<bool, CertError> {
+        self.with_parsed(|c| c.subject().iter_rdn().next().is_none())
+    }
+
+    /// The Subject Alternative Name extension as a [`SanView`], or `None` if
+    /// the extension is absent.
+    ///
+    /// Relied on by `san_present_if_subject_empty` (RFC 5280 §4.2.1.6) for
+    /// presence, criticality, and emptiness only. A malformed or duplicated
+    /// extension is treated as absent (`None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_alt_name(&self) -> Result<Option<SanView>, CertError> {
+        self.with_parsed(|c| {
+            c.subject_alternative_name()
+                .ok()
+                .flatten()
+                .map(|ext| SanView {
+                    critical: ext.critical,
+                    is_empty: ext.value.general_names.is_empty(),
+                })
+        })
+    }
+
     /// The raw DER bytes backing this certificate.
     pub fn der_bytes(&self) -> &[u8] {
         &self.der
@@ -197,6 +413,123 @@ mod tests {
         #[test]
         fn load_routes_garbage_der_to_error() {
             Cert::load(&[0x00, 0x01, 0x02, 0x03]).unwrap_err();
+        }
+    }
+
+    mod rfc5280_accessors {
+        use super::*;
+
+        /// Loads the workspace `testdata/good.pem` fixture (a v3 leaf cert).
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        #[test]
+        fn good_cert_is_version_3() {
+            let cert = good_cert();
+
+            let version = cert.version().unwrap();
+
+            assert_eq!(version, 2, "DER version 2 encodes X.509 v3");
+        }
+
+        #[test]
+        fn good_cert_has_extensions() {
+            let cert = good_cert();
+
+            assert!(cert.has_extensions().unwrap());
+        }
+
+        #[test]
+        fn good_cert_subject_is_not_empty() {
+            let cert = good_cert();
+
+            assert!(!cert.subject_is_empty().unwrap());
+        }
+
+        #[test]
+        fn good_cert_is_a_leaf() {
+            let cert = good_cert();
+
+            let bc = cert.basic_constraints().unwrap().unwrap();
+
+            assert!(!bc.is_ca, "good.pem carries CA:FALSE basic constraints");
+            assert!(
+                !bc.critical,
+                "good.pem's basic constraints are not critical"
+            );
+            assert!(!cert.is_ca().unwrap());
+        }
+
+        #[test]
+        fn good_cert_serial_is_positive_and_within_20_octets() {
+            let cert = good_cert();
+
+            let summary = cert.serial_summary().unwrap();
+
+            assert!(!summary.is_zero);
+            assert!(!summary.is_negative);
+            assert!(summary.octet_len <= 20, "got {} octets", summary.octet_len);
+        }
+
+        #[test]
+        fn good_cert_serial_octets_match_summary_length() {
+            let cert = good_cert();
+
+            let octets = cert.serial_der_octets().unwrap();
+            let summary = cert.serial_summary().unwrap();
+
+            assert_eq!(octets.len(), summary.octet_len);
+        }
+
+        #[test]
+        fn good_cert_has_no_key_usage_or_san() {
+            let cert = good_cert();
+
+            assert!(cert.key_usage().unwrap().is_none());
+            assert!(cert.subject_alt_name().unwrap().is_none());
+        }
+    }
+
+    mod serial_summary {
+        use super::*;
+
+        /// Builds a minimal `SerialSummary` directly to document its semantics.
+        fn summarize(octets: &[u8]) -> SerialSummary {
+            SerialSummary {
+                is_zero: octets.iter().all(|&b| b == 0),
+                is_negative: octets.first().is_some_and(|&b| b & 0x80 != 0),
+                octet_len: octets.len(),
+            }
+        }
+
+        #[test]
+        fn single_zero_octet_is_zero_and_not_negative() {
+            let summary = summarize(&[0x00]);
+
+            assert!(summary.is_zero);
+            assert!(!summary.is_negative);
+            assert_eq!(summary.octet_len, 1);
+        }
+
+        #[test]
+        fn high_bit_set_leading_octet_is_negative() {
+            let summary = summarize(&[0x80, 0x01]);
+
+            assert!(!summary.is_zero);
+            assert!(summary.is_negative);
+            assert_eq!(summary.octet_len, 2);
+        }
+
+        #[test]
+        fn twenty_one_octets_exceeds_ceiling() {
+            let summary = summarize(&[0x01; 21]);
+
+            assert!(summary.octet_len > 20);
+            assert!(!summary.is_negative);
         }
     }
 }

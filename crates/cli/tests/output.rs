@@ -13,9 +13,10 @@
 //! prefixes / structural facts (a `warn` line exists, a group header is present,
 //! the JSON keys are correct) and never on the volatile `now is ...` value.
 //!
-//! The two fully-stable invocations are exercised verbatim:
-//! - `--source rfc5280` on `expired.pem` -> `OK: no findings` (no hygiene lint
-//!   runs, so nothing time-dependent surfaces).
+//! The two fully-stable invocations are exercised:
+//! - `--source rfc5280` on `expired.pem` -> the rfc5280 group renders with a
+//!   passed/not-applicable summary and `OK: no findings` (no time-dependent
+//!   hygiene lint runs, so nothing volatile surfaces).
 //! - `--min-severity error` on `good.pem` -> `OK: no findings` (the good cert has
 //!   no error-or-above findings).
 
@@ -95,8 +96,10 @@ mod text_output {
         assert!(!stdout.contains("OK: no findings"));
     }
 
-    /// `--source rfc5280` on the expired fixture is fully stable: no hygiene lint
-    /// runs, so nothing surfaces and the no-findings line prints with exit 0.
+    /// `--source rfc5280` on the expired fixture is fully stable: the rfc5280
+    /// lints are all either applicable-and-passing or not-applicable (no
+    /// time-dependent hygiene lint runs), so the source group renders with a
+    /// passed/not-applicable summary and zero findings surface.
     #[test]
     fn source_rfc5280_on_expired_reports_no_findings() {
         // Setup + Invoke
@@ -109,13 +112,27 @@ mod text_output {
         // Find
         let stdout = stdout_of(&output);
 
-        // Expect: clean exit, the explicit no-findings line, and no hygiene group.
+        // Expect: clean exit, the rfc5280 group header and its passed/not-applicable
+        // summary, and the explicit no-findings line. (Counts asserted via stable
+        // substrings rather than exact equality so the test tracks the renderer's
+        // by-design non-empty-group output.)
         assert!(
             output.status.success(),
             "expected exit 0, stderr: {:?}",
             output.stderr
         );
-        assert_eq!(stdout, "OK: no findings\n");
+        assert!(
+            stdout.contains("[rfc5280]"),
+            "missing rfc5280 group header:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("(3 passed, 3 not applicable)"),
+            "missing passed/not-applicable summary:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("OK: no findings"),
+            "missing no-findings line:\n{stdout}"
+        );
     }
 
     /// `--min-severity error` on the good fixture is fully stable: the good cert

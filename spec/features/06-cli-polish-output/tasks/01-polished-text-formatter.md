@@ -14,7 +14,8 @@ depends_on: []
 
 Upgrade the text formatter (from feature 02) to group by `RuleSource`, add a per-severity
 summary line, summarize `NotApplicable` lints compactly, render multiple certs / a chain,
-and guarantee deterministic output suitable for golden snapshots.
+add an opt-in verbose per-lint listing, and guarantee deterministic output suitable for
+golden snapshots.
 
 ## Files Owned (conflict scope)
 
@@ -41,6 +42,27 @@ into the new functions). No other feature-06 code task touches this file.
      in v1, others are chain context. Keep output deterministic.
 4. Keep `render_json` consistent (counts can be a top-level field if helpful, but do not
    break the nested per-outcome shape from feature 02).
+5. Add an opt-in **verbose** per-lint listing to the text formatter (text only — JSON is
+   unaffected; it already emits every lint):
+   - Thread a verbosity selector into `render_text` (and `render_text_chain`), e.g. a
+     `verbose: bool` parameter or a small `enum Verbosity { Summary, PerLint }`. Keep the
+     default path byte-for-byte identical to today's output.
+   - **Default (Summary):** unchanged — the collapsed `(N passed, M not applicable)` line per
+     source group.
+   - **Verbose (PerLint):** within each source group, list **every** lint on its own line with a
+     fixed-width status token followed by its `lint_id`, e.g.
+     ```
+     [rfc5280]
+       pass  rfc5280_version_is_v3
+       n/a   rfc5280_basic_constraints_critical_on_ca
+     ```
+     Use stable status tokens — propose `pass` (applicable, no surviving findings) and `n/a`
+     (NotApplicable). Failing lints still render their existing finding lines
+     (`  <severity> [<lint_id>] <message>`) unchanged; the collapsed summary line is **omitted**
+     in verbose mode (the per-lint lines replace it).
+   - Order lints deterministically within each group (e.g. sorted by `lint_id`) so the verbose
+     listing is golden-snapshot stable. No timestamps or other nondeterministic content.
+   - The per-severity summary/counts line behaviour is unchanged by verbosity.
 
 ## Acceptance Criteria
 
@@ -48,6 +70,10 @@ into the new functions). No other feature-06 code task touches this file.
 - [ ] Summary line shows correct per-severity counts.
 - [ ] `NotApplicable` lints are summarized, not listed line by line.
 - [ ] Multi-cert/chain rendering labels each cert and groups output clearly.
+- [ ] Verbose mode lists every lint individually (status token + `lint_id`) within its source
+      group, in deterministic (sorted) order; failing-lint finding lines unchanged.
+- [ ] Verbose mode omits the collapsed `(N passed, M not applicable)` summary line (replaced by
+      the per-lint lines); default (non-verbose) output is byte-for-byte unchanged.
 - [ ] `cargo clippy --all-targets -- -D warnings` clean.
 
 ## Notes / Dependencies
