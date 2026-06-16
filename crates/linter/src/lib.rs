@@ -24,10 +24,12 @@
 pub mod cert;
 mod finding;
 pub mod lints;
+pub mod registry;
 mod source;
 
 pub use cert::Cert;
 pub use finding::{Applicability, Finding, LintOutcome, Severity};
+pub use registry::{Registry, default_registry};
 pub use source::RuleSource;
 
 /// A single certificate-linting rule.

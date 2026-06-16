@@ -2,7 +2,7 @@
 agent: developer
 seq: 1
 title: serde derives on contract types (feature-gated)
-status: pending
+status: done
 touches:
   - crates/linter/src/finding.rs
   - crates/linter/src/source.rs
@@ -29,7 +29,8 @@ edits `Cargo.toml` / lib.rs) to avoid manifest conflicts — see `depends_on` on
 ## Steps
 
 1. `crates/linter/Cargo.toml`:
-   - Add `serde = { version = "1", features = ["derive"], optional = true }`.
+   - Add `serde = { version = "1", features = ["derive"], optional = true }`
+     (latest stable 1.0.228, pinned 2026-06-16).
    - Add a `[features]` section with `serde = ["dep:serde"]` (and consider a `default`
      that does NOT enable it, per "keep the core lean").
 2. `crates/linter/src/source.rs` — add

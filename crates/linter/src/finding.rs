@@ -2,6 +2,9 @@
 
 use crate::source::RuleSource;
 
+#[cfg(feature = "serde")]
+use serde::Serialize;
+
 /// How serious a [`Finding`] is.
 ///
 /// There is deliberately no `Pass` variant: a lint that found nothing wrong
@@ -10,7 +13,12 @@ use crate::source::RuleSource;
 /// The variants are ordered `Notice < Warn < Error < Fatal`, which lets callers
 /// implement threshold flags such as `--min-severity` and `--fail-on` via simple
 /// comparisons.
+///
+/// When serialized (with the `serde` feature), variants are rendered in
+/// `snake_case`: `notice`, `warn`, `error`, `fatal`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Severity {
     /// Informational; not a problem on its own.
     Notice,
@@ -26,7 +34,12 @@ pub enum Severity {
 ///
 /// The engine only calls [`Lint::check`](crate::Lint::check) when a lint reports
 /// [`Applicability::Applies`].
+///
+/// When serialized (with the `serde` feature), variants are rendered in
+/// `snake_case`: `applies`, `not_applicable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Applicability {
     /// The lint's rule is relevant to this certificate and should be checked.
     Applies,
@@ -38,6 +51,7 @@ pub enum Applicability {
 ///
 /// A lint may return several findings from one [`check`](crate::Lint::check) call.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct Finding {
     /// How serious this problem is.
     pub severity: Severity,
@@ -51,7 +65,12 @@ pub struct Finding {
 /// [`source`](LintOutcome::source)) alongside the outcome. An empty
 /// [`findings`](LintOutcome::findings) list together with
 /// [`Applicability::Applies`] means the certificate passed that lint.
+///
+/// When serialized (with the `serde` feature), this produces a single nested
+/// object carrying `lint_id`, `source`, `applicability`, and its own `findings`
+/// array.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct LintOutcome {
     /// Stable identifier of the lint that produced this outcome.
     pub lint_id: &'static str,

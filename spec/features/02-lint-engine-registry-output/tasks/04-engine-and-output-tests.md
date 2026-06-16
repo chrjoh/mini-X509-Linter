@@ -2,7 +2,7 @@
 agent: tester
 seq: 4
 title: Engine + filtering + output tests
-status: pending
+status: done
 touches:
   - crates/linter/tests/registry.rs
   - crates/cli/tests/output.rs

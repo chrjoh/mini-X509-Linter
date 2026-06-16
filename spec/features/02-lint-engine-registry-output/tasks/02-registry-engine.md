@@ -2,7 +2,7 @@
 agent: developer
 seq: 2
 title: Registry + run engine (no short-circuit) + source filter
-status: pending
+status: done
 touches:
   - crates/linter/src/registry.rs
   - crates/linter/src/lib.rs

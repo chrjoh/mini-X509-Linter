@@ -49,5 +49,8 @@ every applicable one without short-circuiting, and produces both text and JSON o
 
 ## Dependencies
 
-- `serde = { version = "1", features = ["derive"] }` (linter, feature-gated)
-- `serde_json = "1"` (cli)
+Versions pinned to current latest stable releases on 2026-06-16 (verified against crates.io).
+serde and serde_json are released in lockstep by the same project; matching 1.x releases chosen.
+
+- `serde = { version = "1", features = ["derive"] }` (linter, feature-gated) — latest stable 1.0.228
+- `serde_json = "1"` (cli) — latest stable 1.0.150

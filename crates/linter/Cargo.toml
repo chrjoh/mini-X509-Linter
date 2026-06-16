@@ -13,3 +13,11 @@ der = "0.8"
 oid-registry = "0.8"
 # Bumped to 2 to match x509-parser's own `thiserror ^2.0`.
 thiserror = "2"
+# Optional, feature-gated: only pulled in when JSON output is needed (CLI).
+# Pinned 2026-06-16 to latest stable 1.0.228; keeps the core crate lean by default.
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+# Off by default to keep the core crate dependency-free; enable for JSON output.
+default = []
+serde = ["dep:serde"]

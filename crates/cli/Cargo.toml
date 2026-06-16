@@ -8,7 +8,10 @@ name = "mini-x509-lint"
 path = "src/main.rs"
 
 [dependencies]
-linter = { path = "../linter" }
+# `serde` feature enables Serialize on the contract types for JSON output.
+linter = { path = "../linter", features = ["serde"] }
 # Pinned 2026-06-15 to latest stable releases (see feature 01 plan.md).
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+# JSON formatter. Pinned 2026-06-16 to latest stable 1.0.150.
+serde_json = "1"

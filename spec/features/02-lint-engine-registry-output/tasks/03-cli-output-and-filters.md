@@ -2,7 +2,7 @@
 agent: developer
 seq: 3
 title: CLI filters (--format/--source/--min-severity) + formatters
-status: pending
+status: done
 touches:
   - crates/cli/src/main.rs
   - crates/cli/src/output.rs
@@ -27,7 +27,7 @@ flags, and produce both text (grouped by `RuleSource`) and nested JSON output.
 ## Steps
 
 1. `crates/cli/Cargo.toml`:
-   - Add `serde_json = "1"`.
+   - Add `serde_json = "1"` (latest stable 1.0.150, pinned 2026-06-16).
    - Enable the linter `serde` feature: `linter = { path = "../linter", features = ["serde"] }`.
 2. `crates/cli/src/main.rs`:
    - Replace the hard-coded single-lint call from feature 01 with `default_registry()`.
