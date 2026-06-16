@@ -2,7 +2,7 @@
 agent: tester
 seq: 4
 title: Hygiene fixtures + per-lint tests
-status: pending
+status: done
 touches:
   - testdata/generate.sh
   - testdata/hygiene_sha1_signature.pem

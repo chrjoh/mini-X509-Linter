@@ -394,6 +394,37 @@ mod default_registry_engine {
             only.message
         );
     }
+
+    /// Isolation guard for `expired.pem`: run over the FULL shipped registry it
+    /// must produce findings from `hygiene_not_expired` ONLY — that single Warn,
+    /// nothing else. This proves the expired fixture isolates exactly the
+    /// `not_expired` rule end-to-end across rfc5280 + hygiene (the dual of the
+    /// `good.pem` "no Error/Fatal" guard, but pinned to the one expected finding).
+    #[test]
+    fn expired_fixture_isolates_only_the_not_expired_finding() {
+        // Setup.
+        let registry = default_registry();
+        let cert = load_leaf(EXPIRED_PEM);
+
+        // Invoke.
+        let outcomes = registry.run(&cert);
+
+        // Find: every (lint_id, finding) pair across the whole registry.
+        let all_findings: Vec<(&str, &Finding)> = outcomes
+            .iter()
+            .flat_map(|o| o.findings.iter().map(move |f| (o.lint_id, f)))
+            .collect();
+
+        // Expect: exactly one finding overall, from hygiene_not_expired, at Warn.
+        assert_eq!(
+            all_findings.len(),
+            1,
+            "expired.pem must surface exactly one finding across the registry; got {all_findings:?}"
+        );
+        let (lint_id, finding) = all_findings[0];
+        assert_eq!(lint_id, "hygiene_not_expired");
+        assert_eq!(finding.severity, Severity::Warn);
+    }
 }
 
 // NOTE on the serde/JSON wire shape at the linter level:

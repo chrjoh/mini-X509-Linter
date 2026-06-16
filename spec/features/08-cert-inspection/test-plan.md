@@ -16,11 +16,13 @@ in nested modules. Snapshot testing via `insta`. CLI behaviour driven against th
 
 ## Fixtures (`testdata/`)
 
-- `slh_dsa_root_ca.pem` — NEW vendored self-signed SLH-DSA (SPHINCS+) post-quantum root CA. Provenance
-  documented in the test header (copied from the external `cert-bar` motivating cert; OIDs intentionally
-  unknown to `oid-registry`). Expected: KeyUsage `Certificate Sign, CRL Sign` (not critical);
-  BasicConstraints critical `CA:TRUE`; `SAN DNS:SLH-DSA-SHA2-128S Root CA`;
-  `subject = issuer = CN=SLH-DSA-SHA2-128S Root CA, C=SE, O=NIST PQC SPHINCSplus`.
+- `slh_dsa_root_ca.pem` — NEW self-signed SLH-DSA (SPHINCS+) post-quantum root CA, **generated with
+  openssl 3.6.2** (recipe in `testdata/generate.sh`); NOT sourced from `cert-bar`. Provenance documented
+  in the test header (algorithm OID possibly unknown to `oid-registry`, exercising the raw-OID fallback).
+  Expected (per the generation recipe; confirm with `openssl x509 -noout -text`): `Signature Algorithm:
+  SLH-DSA-SHA2-128s`; KeyUsage `Certificate Sign, CRL Sign` (critical); BasicConstraints critical
+  `CA:TRUE`; `SAN DNS:slh-dsa-test-root`; `subject = issuer = CN=SLH-DSA Test Root, C=SE,
+  O=mini-x509-linter testdata`.
 - Reuse `good.pem` (clean leaf from feature 03) for the baseline summary snapshot.
 
 ## Unit Tests (`crates/linter/src/cert.rs`, `#[cfg(test)]`)

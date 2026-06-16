@@ -27,6 +27,18 @@
 #                                          keyUsage lacks keyCertSign.
 #     - rfc5280_empty_subject_no_san.pem   empty subject DN, no SAN, non-CA leaf.
 #
+#   One fixture per NEW crypto-hygiene lint (feature 04), each a clean leaf that
+#   violates EXACTLY its one hygiene rule and passes everything else (the six RFC
+#   5280 lints, `not_expired`, and the other two hygiene lints):
+#     - hygiene_sha1_signature.pem   RSA-2048 key but SIGNED WITH SHA-1, so the
+#                                    signature algorithm is sha1WithRSAEncryption.
+#                                    Violates ONLY hygiene_no_sha1_signature.
+#     - hygiene_rsa_1024.pem         RSA-1024 key, SHA-256 signature. Violates
+#                                    ONLY hygiene_rsa_key_min_2048.
+#     - hygiene_ecdsa_bad_curve.pem  EC key on secp224r1 (a NAMED curve outside
+#                                    {P-256,P-384,P-521}), SHA-256 signature.
+#                                    Violates ONLY hygiene_ecdsa_curve_allowlist.
+#
 # Design notes
 # ------------
 # * good.pem / expired.pem are LEAF certs (basicConstraints CA:FALSE) with a
@@ -176,3 +188,59 @@ patch_version_to_v1 "$DER_TMP"
 openssl x509 -inform DER -in "$DER_TMP" -outform PEM -out "$HERE/rfc5280_version_not_v3.pem"
 echo "wrote $HERE/rfc5280_version_not_v3.pem (version byte patched v3 -> v1)"
 rm -f "$V3_TMP" "$DER_TMP"
+
+# --- Crypto-hygiene per-lint violating fixtures (feature 04) ---------------
+#
+# These three reuse the same clean-leaf shape (CA:FALSE via $EXT_LEAF, non-empty
+# subject, no SAN, v3, small positive serial, far-future validity) so each
+# isolates a SINGLE hygiene rule across the WHOLE registry. They cannot reuse the
+# shared $KEY / sign_csr helper unchanged because each needs a specific key or
+# digest, so they carry their own keys and inline the signing step in the same
+# style. All temp keys are cleaned up on exit alongside the earlier ones.
+
+HYG_RSA2048_KEY="$(mktemp)"
+HYG_RSA1024_KEY="$(mktemp)"
+HYG_EC_KEY="$(mktemp)"
+trap 'rm -f "$KEY" "$EXT_LEAF" "$EXT_CA_BC_NONCRIT" "$EXT_CA_NO_KCS" \
+      "$HYG_RSA2048_KEY" "$HYG_RSA1024_KEY" "$HYG_EC_KEY"' EXIT
+
+# sign_leaf_with <out.pem> <key> <subject> <serial> <digest>
+#
+# Self-signs a clean leaf ($EXT_LEAF, far-future validity) from an explicit key
+# with an explicit signature digest. A hygiene-specific variant of sign_csr: it
+# parameterises BOTH the signing key and the digest (sign_csr hardcodes the
+# shared RSA-2048 key and -sha256), which is exactly what these fixtures need.
+sign_leaf_with() {
+  local out="$1" key="$2" subj="$3" serial="$4" digest="$5"
+  local csr
+  csr="$(mktemp)"
+  openssl req -new -key "$key" -subj "$subj" -out "$csr" 2>/dev/null
+  openssl x509 -req -in "$csr" -signkey "$key" -out "$out" \
+    -set_serial "$serial" -not_before "$FAR_FUTURE_NB" -not_after "$FAR_FUTURE_NA" \
+    "-$digest" -extfile "$EXT_LEAF" 2>/dev/null
+  rm -f "$csr"
+  echo "wrote $out"
+}
+
+# hygiene_no_sha1_signature: RSA-2048 key (so rsa_key_min_2048 passes; non-EC so
+# ecdsa_curve_allowlist is N/A) but SIGNED WITH SHA-1, yielding signature
+# algorithm sha1WithRSAEncryption (OID 1.2.840.113549.1.1.5). openssl 3.6.2's
+# default provider still permits RSA-SHA1 signing, so `-sha1` works directly.
+openssl genrsa -out "$HYG_RSA2048_KEY" 2048 2>/dev/null
+sign_leaf_with "$HERE/hygiene_sha1_signature.pem" "$HYG_RSA2048_KEY" \
+  "/CN=sha1-sig.example" 30 sha1
+
+# hygiene_rsa_key_min_2048: RSA-1024 key (below the 2048-bit floor) with a
+# SHA-256 signature (so no_sha1_signature passes; non-EC so ecdsa lint is N/A).
+openssl genrsa -out "$HYG_RSA1024_KEY" 1024 2>/dev/null
+sign_leaf_with "$HERE/hygiene_rsa_1024.pem" "$HYG_RSA1024_KEY" \
+  "/CN=rsa-1024.example" 31 sha256
+
+# hygiene_ecdsa_curve_allowlist: EC key on secp224r1 (NIST P-224, OID
+# 1.3.132.0.33) — a recognised NAMED curve that is NOT on the {P-256,P-384,P-521}
+# allowlist, so the lint fires on the "not allowlisted" path (not the
+# fail-closed "no named curve" path). Signed ecdsa-with-SHA256, so the SHA-1 lint
+# passes; an EC key makes rsa_key_min_2048 N/A.
+openssl ecparam -name secp224r1 -genkey -noout -out "$HYG_EC_KEY" 2>/dev/null
+sign_leaf_with "$HERE/hygiene_ecdsa_bad_curve.pem" "$HYG_EC_KEY" \
+  "/CN=ec-bad-curve.example" 32 sha256

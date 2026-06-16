@@ -2,7 +2,7 @@
 agent: developer
 seq: 2
 title: Implement hygiene lints + consolidate not_expired
-status: pending
+status: done
 touches:
   - crates/linter/src/lints/hygiene/mod.rs
   - crates/linter/src/lints/hygiene/no_sha1_signature.rs

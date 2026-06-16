@@ -2,7 +2,7 @@
 agent: developer
 seq: 3
 title: Register hygiene lints in the default registry
-status: pending
+status: done
 touches:
   - crates/linter/src/registry.rs
 depends_on:

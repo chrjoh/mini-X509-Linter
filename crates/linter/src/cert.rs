@@ -10,10 +10,16 @@
 //! lifetime-free at the cost of cheap re-parsing; the parsed view never escapes.
 
 use thiserror::Error;
+use x509_parser::asn1_rs::Oid;
 use x509_parser::certificate::X509Certificate;
+use x509_parser::objects::{oid_registry, oid2sn};
 use x509_parser::pem::Pem;
 use x509_parser::prelude::FromDer;
+use x509_parser::public_key::PublicKey;
 use x509_parser::time::ASN1Time;
+
+#[cfg(feature = "serde")]
+use serde::Serialize;
 
 /// Errors that can occur while loading or parsing a certificate.
 #[derive(Debug, Error)]
@@ -96,6 +102,42 @@ pub struct SanView {
     pub critical: bool,
     /// `true` if the extension contains no general names.
     pub is_empty: bool,
+}
+
+/// The algorithm family of a certificate's subject public key.
+///
+/// Scopes the key-strength hygiene lints' `applies()` checks: `rsa_key_min_2048`
+/// runs only for [`Rsa`](PublicKeyAlg::Rsa) keys, `ecdsa_curve_allowlist` only
+/// for [`Ec`](PublicKeyAlg::Ec) keys. Any other algorithm is surfaced as
+/// [`Other`](PublicKeyAlg::Other) carrying the raw SPKI algorithm OID so the
+/// facade never silently discards an unrecognised key type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum PublicKeyAlg {
+    /// An RSA public key (`rsaEncryption`).
+    Rsa,
+    /// An elliptic-curve public key (`id-ecPublicKey`).
+    Ec,
+    /// Any other algorithm, identified by its SPKI algorithm OID in dotted form.
+    Other(String),
+}
+
+/// Identification of a named elliptic curve from an EC key's SPKI parameters.
+///
+/// Carries what `ecdsa_curve_allowlist` needs to allowlist P-256 / P-384 /
+/// P-521 (RFC 5480 §2.1.1): the curve OID in dotted form, plus a human-readable
+/// short name from `oid-registry` when one is known. Common curve OIDs are
+/// `1.2.840.10045.3.1.7` (P-256 / prime256v1), `1.3.132.0.34` (P-384 /
+/// secp384r1), and `1.3.132.0.35` (P-521 / secp521r1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub struct NamedCurve {
+    /// The named-curve OID in dotted-decimal form (e.g. `1.2.840.10045.3.1.7`).
+    pub oid: String,
+    /// A human-readable short name from `oid-registry`, or `None` if the OID is
+    /// not in the registry.
+    pub name: Option<String>,
 }
 
 impl Cert {
@@ -353,10 +395,139 @@ impl Cert {
         })
     }
 
+    /// The certificate's signature-algorithm OID in dotted-decimal form
+    /// (the outer `signatureAlgorithm`, e.g. `1.2.840.113549.1.1.11` for
+    /// `sha256WithRSAEncryption`).
+    ///
+    /// `no_sha1_signature` uses this to detect SHA-1-based signatures robustly
+    /// even when `oid-registry` has no name for the algorithm. Known SHA-1 OIDs
+    /// include `1.2.840.113549.1.1.5` (sha1WithRSAEncryption),
+    /// `1.2.840.10040.4.3` (dsa-with-sha1), and `1.2.840.10045.4.1`
+    /// (ecdsa-with-SHA1).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn signature_algorithm_oid(&self) -> Result<String, CertError> {
+        self.with_parsed(|c| c.signature_algorithm.algorithm.to_string())
+    }
+
+    /// A human-readable short name for the signature algorithm from
+    /// `oid-registry`, or `None` if the OID is not in the registry.
+    ///
+    /// Pairs with [`signature_algorithm_oid`](Cert::signature_algorithm_oid):
+    /// the OID is authoritative, the name is a convenience for messages. Unknown
+    /// algorithms yield `None` rather than an error so the facade degrades
+    /// gracefully on unusual inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn signature_algorithm_name(&self) -> Result<Option<String>, CertError> {
+        self.with_parsed(|c| oid_name(&c.signature_algorithm.algorithm))
+    }
+
+    /// The algorithm family of the subject public key (RSA, EC, or other).
+    ///
+    /// Drives the key-strength lints' `applies()` scoping. Unrecognised
+    /// algorithms are returned as [`PublicKeyAlg::Other`] carrying the dotted
+    /// SPKI algorithm OID rather than being treated as an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn public_key_algorithm(&self) -> Result<PublicKeyAlg, CertError> {
+        self.with_parsed(|c| {
+            let oid = &c.public_key().algorithm.algorithm;
+            // RFC 8017 rsaEncryption = 1.2.840.113549.1.1.1
+            // RFC 5480 id-ecPublicKey = 1.2.840.10045.2.1
+            match oid.to_string().as_str() {
+                "1.2.840.113549.1.1.1" => PublicKeyAlg::Rsa,
+                "1.2.840.10045.2.1" => PublicKeyAlg::Ec,
+                other => PublicKeyAlg::Other(other.to_string()),
+            }
+        })
+    }
+
+    /// The RSA modulus length in bits, or `None` for non-RSA keys (and for an
+    /// RSA SPKI that cannot be parsed).
+    ///
+    /// Consumed by `rsa_key_min_2048`, which flags moduli below 2048 bits. The
+    /// bit length is derived from the parsed RSA modulus with any single DER
+    /// sign-padding leading zero removed, so a 2048-bit modulus reports `2048`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn rsa_modulus_bits(&self) -> Result<Option<u32>, CertError> {
+        self.with_parsed(|c| match c.public_key().parsed() {
+            Ok(PublicKey::RSA(rsa)) => rsa_modulus_bits(rsa.modulus),
+            _ => None,
+        })
+    }
+
+    /// The named elliptic curve of an EC public key, or `None` for non-EC keys
+    /// (and for an EC key whose curve parameters are absent or not a named-curve
+    /// OID).
+    ///
+    /// Consumed by `ecdsa_curve_allowlist`. The curve comes from the SPKI
+    /// algorithm parameters (RFC 5480 §2.1.1): a named-curve OID. Explicit-curve
+    /// parameters and missing parameters both yield `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn ec_named_curve(&self) -> Result<Option<NamedCurve>, CertError> {
+        self.with_parsed(|c| {
+            let alg = &c.public_key().algorithm;
+            // Only meaningful for EC keys; ignore for everything else.
+            if alg.algorithm.to_string() != "1.2.840.10045.2.1" {
+                return None;
+            }
+            let params = alg.parameters.as_ref()?;
+            // EC named-curve parameters are an OID; explicit-curve params (a
+            // SEQUENCE) are not, and decode to None.
+            let oid = Oid::try_from(params).ok()?;
+            Some(NamedCurve {
+                oid: oid.to_string(),
+                name: oid_name(&oid),
+            })
+        })
+    }
+
     /// The raw DER bytes backing this certificate.
     pub fn der_bytes(&self) -> &[u8] {
         &self.der
     }
+}
+
+/// Looks up a human-readable short name for `oid` in x509-parser's bundled
+/// registry, returning `None` when the OID is unknown.
+fn oid_name(oid: &Oid<'_>) -> Option<String> {
+    oid2sn(oid, oid_registry()).ok().map(str::to_owned)
+}
+
+/// Computes the bit length of a DER INTEGER modulus, stripping a single
+/// sign-padding leading zero (positive INTEGERs whose MSB is set carry one).
+///
+/// Returns `None` for an empty modulus.
+fn rsa_modulus_bits(modulus: &[u8]) -> Option<u32> {
+    // Drop a leading 0x00 used only to keep the DER INTEGER positive.
+    let stripped = match modulus {
+        [0x00, rest @ ..] => rest,
+        all => all,
+    };
+    let first = stripped.first()?;
+    // Bit length = full bytes below the top byte plus the significant bits of
+    // the top byte (ignoring its own leading zero bits).
+    let lower_bits = (stripped.len() as u32 - 1) * 8;
+    let top_bits = 8 - first.leading_zeros();
+    Some(lower_bits + top_bits)
 }
 
 /// Returns `true` if `bytes` looks like a PEM document.
@@ -491,6 +662,92 @@ mod tests {
 
             assert!(cert.key_usage().unwrap().is_none());
             assert!(cert.subject_alt_name().unwrap().is_none());
+        }
+    }
+
+    mod spki_accessors {
+        use super::*;
+
+        /// Loads the workspace `testdata/good.pem` fixture (RSA-2048 / SHA-256).
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        #[test]
+        fn good_cert_signature_algorithm_is_sha256_rsa() {
+            let cert = good_cert();
+
+            let oid = cert.signature_algorithm_oid().unwrap();
+            let name = cert.signature_algorithm_name().unwrap();
+
+            assert_eq!(oid, "1.2.840.113549.1.1.11", "sha256WithRSAEncryption");
+            assert_eq!(name.as_deref(), Some("sha256WithRSAEncryption"));
+        }
+
+        #[test]
+        fn good_cert_public_key_algorithm_is_rsa() {
+            let cert = good_cert();
+
+            let alg = cert.public_key_algorithm().unwrap();
+
+            assert_eq!(alg, PublicKeyAlg::Rsa);
+        }
+
+        #[test]
+        fn good_cert_rsa_modulus_is_2048_bits() {
+            let cert = good_cert();
+
+            let bits = cert.rsa_modulus_bits().unwrap();
+
+            assert_eq!(bits, Some(2048));
+        }
+
+        #[test]
+        fn good_cert_has_no_ec_curve() {
+            let cert = good_cert();
+
+            let curve = cert.ec_named_curve().unwrap();
+
+            assert!(curve.is_none(), "RSA key has no named curve");
+        }
+    }
+
+    mod rsa_modulus_bits {
+        use super::super::rsa_modulus_bits;
+
+        #[test]
+        fn strips_single_sign_padding_zero() {
+            // 0x00 0x80 ... -> high bit set after stripping the pad: 1 byte = 8 bits.
+            let bits = rsa_modulus_bits(&[0x00, 0x80]);
+
+            assert_eq!(bits, Some(8));
+        }
+
+        #[test]
+        fn counts_significant_bits_of_top_byte() {
+            // 0x01 0x00 -> top byte 0x01 contributes 1 bit, plus one full lower byte.
+            let bits = rsa_modulus_bits(&[0x01, 0x00]);
+
+            assert_eq!(bits, Some(9));
+        }
+
+        #[test]
+        fn full_top_byte_counts_eight_bits() {
+            // 0xFF over 256 bytes (no pad) = 256 * 8 = 2048 bits.
+            let modulus = vec![0xFFu8; 256];
+            let bits = rsa_modulus_bits(&modulus);
+
+            assert_eq!(bits, Some(2048));
+        }
+
+        #[test]
+        fn empty_modulus_is_none() {
+            let bits = rsa_modulus_bits(&[]);
+
+            assert!(bits.is_none());
         }
     }
 
