@@ -63,6 +63,17 @@ into the new functions). No other feature-06 code task touches this file.
    - Order lints deterministically within each group (e.g. sorted by `lint_id`) so the verbose
      listing is golden-snapshot stable. No timestamps or other nondeterministic content.
    - The per-severity summary/counts line behaviour is unchanged by verbosity.
+6. Add an **optional, verbose-only** `purpose:` header line so the active scope is visible in verbose
+   text output (the `--purpose` flag is wired in task 02; this task only renders it):
+   - Accept the resolved purpose as a parameter to `render_text` (and the chain renderer), e.g. a
+     small struct/enum value the caller passes. A simple, snapshot-stable rendering is recommended,
+     e.g. `purpose: generic (auto)` — the resolved purpose plus, in parentheses, whether it came from
+     `auto`; for an explicit `--purpose tls-server` render `purpose: tls-server`.
+   - Emit this line **only** in verbose mode; default (non-verbose) output is byte-for-byte
+     unchanged. Keep it deterministic (no timestamps, fixed wording) for golden snapshots.
+   - This is the only purpose-driven output addition. Purpose-skipped sources are **not** rendered as
+     `NotApplicable` — they are simply absent (the CLI passes a smaller source set to the engine), so
+     the formatter needs no special handling for them beyond the header line.
 
 ## Acceptance Criteria
 
@@ -74,6 +85,10 @@ into the new functions). No other feature-06 code task touches this file.
       group, in deterministic (sorted) order; failing-lint finding lines unchanged.
 - [ ] Verbose mode omits the collapsed `(N passed, M not applicable)` summary line (replaced by
       the per-lint lines); default (non-verbose) output is byte-for-byte unchanged.
+- [ ] Verbose mode emits a deterministic `purpose:` header line reflecting the resolved purpose (and
+      `(auto)` when resolved from `auto`); default (non-verbose) output does not include it and is
+      byte-for-byte unchanged. No `NotApplicable` outcomes are synthesized for purpose-skipped
+      sources.
 - [ ] `cargo clippy --all-targets -- -D warnings` clean.
 
 ## Notes / Dependencies

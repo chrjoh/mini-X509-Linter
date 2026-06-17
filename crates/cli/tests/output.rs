@@ -26,9 +26,13 @@ use std::process::{Command, Output};
 /// Absolute path to the compiled `mini-x509-lint` binary under test.
 const BIN: &str = env!("CARGO_BIN_EXE_mini-x509-lint");
 
-/// The `notAfter` of `testdata/expired.pem` in Unix seconds (2011-01-01); the
+/// The `notAfter` of `testdata/expired.pem` in Unix seconds (2024-06-01); the
 /// stable, time-independent part of the expiry message.
-const EXPIRED_NOT_AFTER: i64 = 1_293_840_000;
+///
+/// Feature 05 reshaped `expired.pem` to a BR-compliant-but-past leaf
+/// (`2024-01-01 -> 2024-06-01`), so `notAfter` is `1_717_200_000` (2024-06-01),
+/// not the old `1_293_840_000` (2011-01-01).
+const EXPIRED_NOT_AFTER: i64 = 1_717_200_000;
 
 /// Resolves a fixture path under the workspace-root `testdata/` directory.
 ///

@@ -8,8 +8,8 @@
 //! result never depends on the wall clock.
 //!
 //! Fixtures (see `testdata/generate.sh` for how they were produced):
-//! - `good.pem`    notBefore=2024-01-01, notAfter=2124-01-01 (far future)
-//! - `expired.pem` notBefore=2010-01-01, notAfter=2011-01-01 (long past)
+//! - `good.pem`    notBefore=2026-06-01, notAfter=2027-06-01 (currently valid)
+//! - `expired.pem` notBefore=2024-01-01, notAfter=2024-06-01 (past)
 
 use linter::lints::hygiene::not_expired::NotExpired;
 use linter::{Applicability, Cert, Lint, Severity};
@@ -20,9 +20,13 @@ use linter::{Applicability, Cert, Lint, Severity};
 const GOOD_PEM: &[u8] = include_bytes!("../../../testdata/good.pem");
 const EXPIRED_PEM: &[u8] = include_bytes!("../../../testdata/expired.pem");
 
-/// A "now" well past the expired fixture's notAfter (2011) but before the good
-/// fixture's notAfter (2124): 2100-01-01 in Unix seconds.
-const NOW_2100: i64 = 4_102_444_800;
+/// A "now" inside good.pem's validity window (2026-06-01 → 2027-06-01) and well
+/// past expired.pem's notAfter (2024-06-01): 2026-12-01 in Unix seconds.
+///
+/// Time-fragile: this instant must stay strictly within good.pem's window. If
+/// good.pem is regenerated with a different window (see `testdata/generate.sh`),
+/// this constant must move too.
+const NOW_IN_GOOD_WINDOW: i64 = 1_796_083_200;
 
 /// Loads the single leaf certificate from a PEM fixture, surfacing the parse
 /// error (via `unwrap`) if the fixture is malformed.
@@ -78,7 +82,7 @@ mod cert_load {
             .to_vec();
         let cert = Cert::load(&der).unwrap().remove(0);
 
-        let findings = NotExpired::with_now_unix(NOW_2100).check(&cert);
+        let findings = NotExpired::with_now_unix(NOW_IN_GOOD_WINDOW).check(&cert);
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warn);
@@ -92,7 +96,7 @@ mod not_expired_lint {
     fn expired_fixture_yields_one_warn_finding() {
         // Setup: an expired cert and a deterministic "now" past its notAfter.
         let cert = load_leaf(EXPIRED_PEM);
-        let lint = NotExpired::with_now_unix(NOW_2100);
+        let lint = NotExpired::with_now_unix(NOW_IN_GOOD_WINDOW);
 
         // Invoke.
         let findings = lint.check(&cert);
@@ -104,9 +108,9 @@ mod not_expired_lint {
 
     #[test]
     fn good_fixture_yields_no_findings() {
-        // Setup: a far-future cert and a "now" inside its window.
+        // Setup: a currently-valid cert and a "now" inside its window.
         let cert = load_leaf(GOOD_PEM);
-        let lint = NotExpired::with_now_unix(NOW_2100);
+        let lint = NotExpired::with_now_unix(NOW_IN_GOOD_WINDOW);
 
         // Invoke.
         let findings = lint.check(&cert);
@@ -117,8 +121,10 @@ mod not_expired_lint {
 
     #[test]
     fn expired_fixture_passes_when_now_is_before_not_after() {
-        // Boundary: with "now" pinned before 2011, even the expired fixture is
-        // not yet expired — proving the comparison, not the wall clock, decides.
+        // Boundary: with "now" pinned at the Unix epoch (1970, before
+        // expired.pem's notAfter of 2024-06-01 and even its notBefore), the
+        // expired fixture is not yet expired — proving the comparison, not the
+        // wall clock, decides.
         let cert = load_leaf(EXPIRED_PEM);
         let lint = NotExpired::with_now_unix(0); // 1970, before notBefore even
 

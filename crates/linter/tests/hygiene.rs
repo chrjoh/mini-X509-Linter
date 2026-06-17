@@ -21,6 +21,19 @@
 //!
 //! Conventions (`.claude/rules/rust-testing-core.md`): SIFER, nested module per
 //! lint, `.unwrap()`-style result assertions.
+//!
+//! # Note on feature 05 (CA/Browser Forum BR lints)
+//!
+//! The default registry now also contains the four broad-scoped `cabf_br_*`
+//! lints, so `default_registry()` runs 14 lints. To keep the isolation tests
+//! below valid under broad scoping, every non-CA leaf fixture (including these
+//! hygiene fixtures) was regenerated BR-compliant-except-its-target: each gains a
+//! `serverAuth` EKU, a SAN whose dNSName equals the subject CN (a public
+//! `*.example.com` name), and a currently-valid `<=398d` window. That is why
+//! these hygiene fixtures now carry SAN/EKU; the assertion logic is UNCHANGED.
+//!
+//! ⚠️ Time-fragility: those leaves EXPIRE on 2027-06-01; regenerate `testdata/`
+//! annually (see `testdata/generate.sh`).
 
 use linter::lints::hygiene::{EcdsaCurveAllowlist, NoSha1Signature, RsaKeyMin2048};
 use linter::{Applicability, Cert, Lint, Severity, default_registry};

@@ -127,9 +127,9 @@ fn evaluate(lint: &dyn Lint, cert: &Cert) -> LintOutcome {
 /// This is the single, obvious place lints are wired up. Later features append
 /// their lints here.
 pub fn default_registry() -> Registry {
-    use crate::lints::rfc5280;
-
+    use crate::lints::cabf_br;
     use crate::lints::hygiene;
+    use crate::lints::rfc5280;
 
     Registry::with_lints(vec![
         // --- add new lints here ---
@@ -148,6 +148,13 @@ pub fn default_registry() -> Registry {
         Box::new(rfc5280::BasicConstraintsCriticalOnCa::new()),
         Box::new(rfc5280::KeyUsagePresentWhenCa::new()),
         Box::new(rfc5280::SanPresentIfSubjectEmpty::new()),
+        // CA/Browser Forum Baseline Requirements lints (feature 05). Order is
+        // deterministic and matters for the feature 06 golden test — keep it
+        // stable.
+        Box::new(cabf_br::ValidityMax398Days::new()),
+        Box::new(cabf_br::CnInSan::new()),
+        Box::new(cabf_br::NoInternalNamesOrReservedIp::new()),
+        Box::new(cabf_br::ExtKeyUsageServerAuthPresent::new()),
     ])
 }
 
@@ -473,11 +480,14 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             let cert = sample_cert();
             let outcomes = registry.run(&cert);
 
-            // Expect: the four hygiene lints plus all six RFC 5280 lints are
-            // wired in and reported — one outcome per registered lint.
+            // Expect: the four hygiene lints, all six RFC 5280 lints, and the
+            // four CA/Browser Forum BR lints are wired in and reported — one
+            // outcome per registered lint. `sample_cert()` is a CA, so the four
+            // BR lints are `NotApplicable` but still produce one outcome each,
+            // keeping the outcome count equal to the registry length.
             assert!(!registry.is_empty());
-            assert_eq!(registry.len(), 10);
-            assert_eq!(outcomes.len(), 10);
+            assert_eq!(registry.len(), 14);
+            assert_eq!(outcomes.len(), 14);
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
             for expected in [
@@ -491,6 +501,10 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "rfc5280_basic_constraints_critical_on_ca",
                 "rfc5280_key_usage_present_when_ca",
                 "rfc5280_san_present_if_subject_empty",
+                "cabf_br_validity_max_398_days",
+                "cabf_br_cn_in_san",
+                "cabf_br_no_internal_names_or_reserved_ip",
+                "cabf_br_ext_key_usage_server_auth_present",
             ] {
                 assert!(
                     ids.contains(&expected),
@@ -556,6 +570,37 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 );
             }
             assert!(!ids.iter().any(|id| id.starts_with("rfc5280_")));
+        }
+
+        #[test]
+        fn cabf_br_source_filter_runs_exactly_the_cabf_br_set() {
+            // Setup & Invoke: filtering by RuleSource::CabfBr must select the
+            // four BR lints and nothing else (no RFC 5280 or hygiene lints).
+            // Filtering is by source, before applicability, so the four BR lints
+            // appear even though `sample_cert()` is a CA (they are NotApplicable
+            // but still emitted as outcomes).
+            let registry = default_registry();
+            let cert = sample_cert();
+            let outcomes = registry.run_filtered(&cert, &[RuleSource::CabfBr]);
+
+            // Expect
+            assert_eq!(outcomes.len(), 4);
+            assert!(outcomes.iter().all(|o| o.source == RuleSource::CabfBr));
+
+            let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
+            for expected in [
+                "cabf_br_validity_max_398_days",
+                "cabf_br_cn_in_san",
+                "cabf_br_no_internal_names_or_reserved_ip",
+                "cabf_br_ext_key_usage_server_auth_present",
+            ] {
+                assert!(
+                    ids.contains(&expected),
+                    "cabf_br filter missing lint {expected}; got {ids:?}"
+                );
+            }
+            assert!(!ids.iter().any(|id| id.starts_with("rfc5280_")));
+            assert!(!ids.iter().any(|id| id.starts_with("hygiene_")));
         }
 
         #[test]

@@ -9,9 +9,12 @@
 //! owned DER and re-parses it on each accessor call. This keeps the facade
 //! lifetime-free at the cost of cheap re-parsing; the parsed view never escapes.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use thiserror::Error;
 use x509_parser::asn1_rs::Oid;
 use x509_parser::certificate::X509Certificate;
+use x509_parser::extensions::GeneralName;
 use x509_parser::objects::{oid_registry, oid2sn};
 use x509_parser::pem::Pem;
 use x509_parser::prelude::FromDer;
@@ -102,6 +105,30 @@ pub struct SanView {
     pub critical: bool,
     /// `true` if the extension contains no general names.
     pub is_empty: bool,
+}
+
+/// A read-only view of the certificate's Extended Key Usage extension.
+///
+/// Carries what the CA/Browser Forum BR `ext_key_usage_server_auth_present`
+/// lint needs (BR §7.1.2.7): whether the extension is present at all, whether
+/// the `serverAuth` purpose (OID `1.3.6.1.5.5.7.3.1`) is asserted, plus the
+/// full set of EKU OIDs in dotted form for richer reporting. A view is only
+/// produced when an EKU extension exists, so [`present`](EkuView::present) is
+/// always `true` here; it is retained for clarity at call sites that store the
+/// view alongside an absent (`None`) case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub struct EkuView {
+    /// `true` because the view is only built when the EKU extension exists.
+    pub present: bool,
+    /// `true` if the extension is marked critical.
+    pub critical: bool,
+    /// `true` if the `serverAuth` purpose (OID `1.3.6.1.5.5.7.3.1`) is present.
+    pub server_auth: bool,
+    /// `true` if the `clientAuth` purpose (OID `1.3.6.1.5.5.7.3.2`) is present.
+    pub client_auth: bool,
+    /// Every EKU purpose OID in dotted-decimal form, in encounter order.
+    pub oids: Vec<String>,
 }
 
 /// The algorithm family of a certificate's subject public key.
@@ -395,6 +422,165 @@ impl Cert {
         })
     }
 
+    /// The `dNSName` entries from the Subject Alternative Name extension, in
+    /// encounter order, as owned strings.
+    ///
+    /// Consumed by the BR `cn_in_san` lint (BR §7.1.4.2) and the
+    /// internal/reserved-name check. Returns an empty `Vec` when the SAN
+    /// extension is absent, empty, or contains no `dNSName` entries. Invalid
+    /// (non-UTF-8) general names are skipped rather than surfaced as an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn san_dns_names(&self) -> Result<Vec<String>, CertError> {
+        self.with_parsed(|c| {
+            let mut names = Vec::new();
+            if let Ok(Some(ext)) = c.subject_alternative_name() {
+                for gn in &ext.value.general_names {
+                    if let GeneralName::DNSName(name) = gn {
+                        names.push((*name).to_string());
+                    }
+                }
+            }
+            names
+        })
+    }
+
+    /// The `iPAddress` entries from the Subject Alternative Name extension, in
+    /// encounter order, as [`std::net::IpAddr`] values.
+    ///
+    /// Consumed by the BR `no_internal_names_or_reserved_ip` lint (BR §4.2.2 /
+    /// §7.1.4.2). A SAN `iPAddress` is a raw octet string: 4 octets for IPv4,
+    /// 16 for IPv6 (RFC 5280 §4.2.1.6). Entries with any other length are
+    /// skipped (they cannot be a valid IP). Returns an empty `Vec` when the SAN
+    /// extension is absent or contains no `iPAddress` entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn san_ip_addresses(&self) -> Result<Vec<IpAddr>, CertError> {
+        self.with_parsed(|c| {
+            let mut addrs = Vec::new();
+            if let Ok(Some(ext)) = c.subject_alternative_name() {
+                for gn in &ext.value.general_names {
+                    if let GeneralName::IPAddress(octets) = gn
+                        && let Some(ip) = ip_from_san_octets(octets)
+                    {
+                        addrs.push(ip);
+                    }
+                }
+            }
+            addrs
+        })
+    }
+
+    /// The Common Name (CN) attribute values from the subject DN, in encounter
+    /// order, as owned strings.
+    ///
+    /// Consumed by the BR `cn_in_san` lint (BR §7.1.4.2): each CN value must be
+    /// present in the SAN. Returns an empty `Vec` when the subject has no CN
+    /// attribute. CN values that are not valid UTF-8 are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_common_names(&self) -> Result<Vec<String>, CertError> {
+        self.with_parsed(|c| {
+            c.subject()
+                .iter_common_name()
+                .filter_map(|atv| atv.as_str().ok().map(str::to_owned))
+                .collect()
+        })
+    }
+
+    /// The Extended Key Usage extension as an [`EkuView`], or `None` if the
+    /// extension is absent.
+    ///
+    /// Relied on by the BR `ext_key_usage_server_auth_present` lint
+    /// (BR §7.1.2.7). A malformed or duplicated extension is treated as absent
+    /// (`None`) rather than surfaced as an error, so the lint never panics on
+    /// odd input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn extended_key_usage(&self) -> Result<Option<EkuView>, CertError> {
+        self.with_parsed(|c| {
+            c.extended_key_usage().ok().flatten().map(|ext| {
+                let eku = ext.value;
+                EkuView {
+                    present: true,
+                    critical: ext.critical,
+                    server_auth: eku.server_auth,
+                    client_auth: eku.client_auth,
+                    oids: eku_oid_strings(eku),
+                }
+            })
+        })
+    }
+
+    /// The Extended Key Usage purpose OIDs in dotted-decimal form, or `None` if
+    /// the EKU extension is absent.
+    ///
+    /// Convenience wrapper over [`extended_key_usage`](Cert::extended_key_usage)
+    /// that yields just the OID list (`Some(vec)` when present, `None` when the
+    /// extension is absent). The list may be empty for an (unusual) EKU with no
+    /// recognised or other purposes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn ext_key_usage_oids(&self) -> Result<Option<Vec<String>>, CertError> {
+        Ok(self.extended_key_usage()?.map(|eku| eku.oids))
+    }
+
+    /// Whether the certificate asserts the `serverAuth` EKU purpose
+    /// (OID `1.3.6.1.5.5.7.3.1`).
+    ///
+    /// Consumed by the BR `ext_key_usage_server_auth_present` lint
+    /// (BR §7.1.2.7). Returns `false` when the EKU extension is absent (a leaf
+    /// with no EKU at all does not assert `serverAuth`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn has_server_auth(&self) -> Result<bool, CertError> {
+        Ok(self
+            .extended_key_usage()?
+            .is_some_and(|eku| eku.server_auth))
+    }
+
+    /// The length of the validity window in whole days
+    /// (`notAfter − notBefore`).
+    ///
+    /// Consumed by the BR `validity_max_398_days` lint (BR §6.3.2). A
+    /// zero-length window (`notAfter == notBefore`) and an inverted window
+    /// (`notAfter < notBefore`) both yield `0`: neither exceeds the 398-day
+    /// ceiling, and the inverted case is the separate concern of
+    /// `rfc5280_validity_not_after_after_not_before`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn validity_days(&self) -> Result<i64, CertError> {
+        self.with_parsed(|c| {
+            let validity = c.validity();
+            // ASN1Time subtraction yields `None` for a zero-length or inverted
+            // window; treat both as a 0-day span for the 398-day ceiling.
+            (validity.not_after - validity.not_before)
+                .map(|d| d.whole_days())
+                .unwrap_or(0)
+        })
+    }
+
     /// The certificate's signature-algorithm OID in dotted-decimal form
     /// (the outer `signatureAlgorithm`, e.g. `1.2.840.113549.1.1.11` for
     /// `sha256WithRSAEncryption`).
@@ -510,6 +696,60 @@ impl Cert {
 /// registry, returning `None` when the OID is unknown.
 fn oid_name(oid: &Oid<'_>) -> Option<String> {
     oid2sn(oid, oid_registry()).ok().map(str::to_owned)
+}
+
+/// Converts a SAN `iPAddress` octet string to an [`IpAddr`].
+///
+/// RFC 5280 §4.2.1.6 encodes an `iPAddress` general name as a raw OCTET STRING:
+/// 4 octets for IPv4, 16 for IPv6. Any other length is not a valid address and
+/// yields `None`.
+fn ip_from_san_octets(octets: &[u8]) -> Option<IpAddr> {
+    match octets.len() {
+        4 => {
+            let bytes: [u8; 4] = octets.try_into().ok()?;
+            Some(IpAddr::V4(Ipv4Addr::from(bytes)))
+        }
+        16 => {
+            let bytes: [u8; 16] = octets.try_into().ok()?;
+            Some(IpAddr::V6(Ipv6Addr::from(bytes)))
+        }
+        _ => None,
+    }
+}
+
+/// Collects every EKU purpose OID from a parsed [`ExtendedKeyUsage`] into
+/// dotted-decimal strings, preserving encounter order: the recognised purposes
+/// first (in the order `x509-parser` flags them), then any `other` OIDs.
+///
+/// [`ExtendedKeyUsage`]: x509_parser::extensions::ExtendedKeyUsage
+fn eku_oid_strings(eku: &x509_parser::extensions::ExtendedKeyUsage<'_>) -> Vec<String> {
+    let mut oids = Vec::new();
+    // Recognised purposes, dotted form per the EKU OID arc (RFC 5280 §4.2.1.12).
+    if eku.any {
+        oids.push("2.5.29.37.0".to_string());
+    }
+    if eku.server_auth {
+        oids.push("1.3.6.1.5.5.7.3.1".to_string());
+    }
+    if eku.client_auth {
+        oids.push("1.3.6.1.5.5.7.3.2".to_string());
+    }
+    if eku.code_signing {
+        oids.push("1.3.6.1.5.5.7.3.3".to_string());
+    }
+    if eku.email_protection {
+        oids.push("1.3.6.1.5.5.7.3.4".to_string());
+    }
+    if eku.time_stamping {
+        oids.push("1.3.6.1.5.5.7.3.8".to_string());
+    }
+    if eku.ocsp_signing {
+        oids.push("1.3.6.1.5.5.7.3.9".to_string());
+    }
+    for oid in &eku.other {
+        oids.push(oid.to_string());
+    }
+    oids
 }
 
 /// Computes the bit length of a DER INTEGER modulus, stripping a single
@@ -657,11 +897,42 @@ mod tests {
         }
 
         #[test]
-        fn good_cert_has_no_key_usage_or_san() {
+        fn good_cert_has_san_and_server_auth_but_no_key_usage() {
             let cert = good_cert();
 
-            assert!(cert.key_usage().unwrap().is_none());
-            assert!(cert.subject_alt_name().unwrap().is_none());
+            // The regenerated BR-compliant good.pem carries a SAN (one dNSName
+            // equal to the CN) and the serverAuth EKU, but deliberately has NO
+            // KeyUsage extension (serverAuth is carried via EKU only).
+            assert!(
+                cert.key_usage().unwrap().is_none(),
+                "good.pem has no KeyUsage extension"
+            );
+
+            let san = cert.subject_alt_name().unwrap();
+            assert!(san.is_some(), "good.pem now carries a SAN extension");
+            assert!(!san.unwrap().is_empty, "good.pem's SAN has a dNSName entry");
+
+            let dns_names = cert.san_dns_names().unwrap();
+            assert_eq!(
+                dns_names,
+                vec!["good.example.com".to_string()],
+                "good.pem's SAN dNSName equals the CN"
+            );
+
+            // The CN is present and matches the SAN dNSName.
+            assert_eq!(
+                cert.subject_common_names().unwrap(),
+                vec!["good.example.com".to_string()],
+                "good.pem CN is good.example.com"
+            );
+
+            let eku = cert.extended_key_usage().unwrap();
+            assert!(eku.is_some(), "good.pem carries an EKU extension");
+            assert!(
+                eku.unwrap().server_auth,
+                "good.pem's EKU asserts serverAuth"
+            );
+            assert!(cert.has_server_auth().unwrap());
         }
     }
 
@@ -748,6 +1019,36 @@ mod tests {
             let bits = rsa_modulus_bits(&[]);
 
             assert!(bits.is_none());
+        }
+    }
+
+    mod ip_from_san_octets {
+        use super::super::ip_from_san_octets;
+        use std::net::IpAddr;
+
+        #[test]
+        fn four_octets_decode_to_ipv4() {
+            let ip = ip_from_san_octets(&[10, 0, 0, 1]);
+
+            assert_eq!(ip, Some("10.0.0.1".parse::<IpAddr>().unwrap()));
+        }
+
+        #[test]
+        fn sixteen_octets_decode_to_ipv6() {
+            let octets = [
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+            ];
+
+            let ip = ip_from_san_octets(&octets);
+
+            assert_eq!(ip, Some("2001:db8::1".parse::<IpAddr>().unwrap()));
+        }
+
+        #[test]
+        fn other_lengths_are_none() {
+            assert!(ip_from_san_octets(&[]).is_none());
+            assert!(ip_from_san_octets(&[1, 2, 3]).is_none());
+            assert!(ip_from_san_octets(&[0u8; 5]).is_none());
         }
     }
 

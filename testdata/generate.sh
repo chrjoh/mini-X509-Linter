@@ -9,49 +9,119 @@
 # Usage:
 #   ./testdata/generate.sh
 #
+# ============================================================================
+# ⚠️  TIME-FRAGILITY WARNING — READ BEFORE TOUCHING THESE FIXTURES  ⚠️
+# ============================================================================
+# Feature 05 (CA/Browser Forum BR lints) introduced BROAD scoping: the four BR
+# lints apply to EVERY non-CA leaf. One of them, cabf_br_validity_max_398_days,
+# requires a leaf's validity window to be BOTH <= 398 days AND currently valid
+# (notAfter in the future). A short window cannot also be far-future, so the
+# BR-compliant leaves below use a fixed, currently-valid <=398-day window:
+#
+#     BR_OK:  2026-06-01  ->  2027-06-01   (365 days)
+#
+# These leaves EXPIRE on 2027-06-01. After that date hygiene_not_expired fires
+# on good.pem and on every per-rule leaf fixture, breaking the "exactly one rule
+# fires" isolation tests WHOLESALE (a flood of not_expired failures).
+#
+#   >>> REGENERATE ANNUALLY (slide the windows forward) BEFORE 2027-06-01. <<<
+#
+# The cabf_br_validity_400_days fixture uses 2026-06-01 -> 2027-07-06 (400 days,
+# also currently valid) and has a slightly later horizon, but the same chore.
+#
+# Two dating strategies were considered:
+#   (a) Fixed dates (chosen here): the committed bytes are reproducible across
+#       regenerations, but require the annual manual slide above.
+#   (b) Relative dates (openssl -days 365): self-healing on regen (always
+#       relative to "now"), but the committed bytes drift every regeneration,
+#       making fixture diffs noisy and the checked-in window non-deterministic.
+# We keep fixed dates for reproducibility and accept the annual-regen chore.
+# ============================================================================
+#
 # Output (written next to this script):
 #
-#   Shared fixtures (used across features 01/02/03):
-#     - good.pem     clean LEAF cert that PASSES every shipped lint.
-#     - expired.pem  same clean leaf shape but with a PAST notAfter, so it
-#                    violates ONLY hygiene `not_expired`.
+#   Shared fixtures (used across features 01–05):
+#     - good.pem     clean BR-compliant LEAF cert that PASSES every shipped lint
+#                    (all 14: 4 hygiene + 6 rfc5280 + 4 cabf_br). RSA-2048 /
+#                    SHA-256, CA:FALSE, serverAuth EKU, SAN DNS = CN, BR_OK
+#                    window.
+#     - expired.pem  same BR-compliant leaf shape but with a PAST <=398d window
+#                    (2024-01-01 -> 2024-06-01, 151d), so it violates ONLY
+#                    hygiene_not_expired. notAfter == 2024-06-01 == Unix
+#                    1_717_200_000 (asserted by EXPIRED_NOT_AFTER constants in
+#                    crates/linter/tests/registry.rs and crates/cli/tests/output.rs).
+#
+#   Under BROAD BR scoping every non-CA leaf is in scope for all four BR lints,
+#   so every leaf fixture is now built BR-COMPLIANT-EXCEPT-ITS-ONE-TARGET: it
+#   gains serverAuth EKU, a SAN whose dNSName entries include the subject CN,
+#   no internal/reserved SAN entries, and a BR_OK window — except where the
+#   single target violation forces deviating from exactly one of those.
+#
+#   NOTE ON NAMES: the reserved-name classifier (lints/cabf_br/reserved.rs)
+#   treats .example / .test / .local / .internal / single-label names as
+#   internal/reserved. So BR-compliant leaf SANs MUST use a genuinely public
+#   FQDN. We use *.example.com (TLD "com" is public; the name does NOT end in a
+#   reserved suffix), which keeps cabf_br_no_internal_names_or_reserved_ip quiet.
 #
 #   One fixture per RFC 5280 lint, each violating EXACTLY that rule and passing
-#   all other RFC 5280 lints (plus `not_expired`, via a far-future notAfter):
-#     - rfc5280_version_not_v3.pem         extensions present but version v1.
-#     - rfc5280_serial_number_zero.pem     serial == 0.
-#     - rfc5280_validity_inverted.pem      notAfter <= notBefore.
+#   all other lints across the full 14-lint registry:
+#     - rfc5280_version_not_v3.pem         BR-compliant v3 leaf, version byte
+#                                          patched v3 -> v1.
+#     - rfc5280_serial_number_zero.pem     serial == 0, else BR-compliant.
+#     - rfc5280_validity_inverted.pem      notAfter == notBefore at a FUTURE
+#                                          instant (zero-length window: <=398d so
+#                                          BR validity passes, future so
+#                                          not_expired passes). serverAuth + SAN.
 #     - rfc5280_ca_bc_not_critical.pem     CA, BasicConstraints not critical
-#                                          (but keyUsage has keyCertSign).
+#                                          (keyUsage has keyCertSign). CA => BR
+#                                          N/A, so UNCHANGED from feature 03.
 #     - rfc5280_ca_missing_keycertsign.pem CA, BasicConstraints critical, but
-#                                          keyUsage lacks keyCertSign.
-#     - rfc5280_empty_subject_no_san.pem   empty subject DN, no SAN, non-CA leaf.
+#                                          keyUsage lacks keyCertSign. CA => BR
+#                                          N/A, UNCHANGED.
+#     - rfc5280_empty_subject_no_san.pem   empty subject DN, NO SAN (target), but
+#                                          serverAuth EKU + BR_OK window ADDED.
+#                                          No CN => cn_in_san silent; no SAN =>
+#                                          internal-name lint silent; serverAuth
+#                                          present => EKU lint silent. Isolates
+#                                          ONLY san_present_if_subject_empty.
 #
-#   One fixture per NEW crypto-hygiene lint (feature 04), each a clean leaf that
-#   violates EXACTLY its one hygiene rule and passes everything else (the six RFC
-#   5280 lints, `not_expired`, and the other two hygiene lints):
-#     - hygiene_sha1_signature.pem   RSA-2048 key but SIGNED WITH SHA-1, so the
-#                                    signature algorithm is sha1WithRSAEncryption.
-#                                    Violates ONLY hygiene_no_sha1_signature.
-#     - hygiene_rsa_1024.pem         RSA-1024 key, SHA-256 signature. Violates
-#                                    ONLY hygiene_rsa_key_min_2048.
-#     - hygiene_ecdsa_bad_curve.pem  EC key on secp224r1 (a NAMED curve outside
+#   One fixture per crypto-hygiene lint (feature 04), each a BR-compliant leaf
+#   (serverAuth + SAN-with-CN + BR_OK) that violates EXACTLY its one hygiene rule:
+#     - hygiene_sha1_signature.pem   RSA-2048 key, SIGNED WITH SHA-1.
+#     - hygiene_rsa_1024.pem         RSA-1024 key, SHA-256 signature.
+#     - hygiene_ecdsa_bad_curve.pem  EC key on secp224r1 (named curve outside
 #                                    {P-256,P-384,P-521}), SHA-256 signature.
-#                                    Violates ONLY hygiene_ecdsa_curve_allowlist.
+#
+#   One fixture per CA/Browser Forum BR lint (feature 05), each a BR-compliant
+#   leaf EXCEPT its one target violation:
+#     - cabf_br_validity_400_days.pem    400d window (2026-06-01 -> 2027-07-06),
+#                                        currently valid. Violates ONLY
+#                                        cabf_br_validity_max_398_days.
+#     - cabf_br_cn_not_in_san.pem        CN=cn-missing.example.com but SAN lists
+#                                        only DNS:other.example.com (omits the
+#                                        CN). Violates ONLY cabf_br_cn_in_san.
+#     - cabf_br_internal_san.pem         CN=public.example.com present in SAN as a
+#                                        public name (cn_in_san quiet) PLUS
+#                                        DNS:internal.local AND IP:10.0.0.1.
+#                                        Violates ONLY
+#                                        cabf_br_no_internal_names_or_reserved_ip
+#                                        (with MULTIPLE findings).
+#     - cabf_br_missing_serverauth.pem   SAN-with-CN, EKU present WITHOUT
+#                                        serverAuth (clientAuth only). Violates
+#                                        ONLY cabf_br_ext_key_usage_server_auth_present.
 #
 # Design notes
 # ------------
-# * good.pem / expired.pem are LEAF certs (basicConstraints CA:FALSE) with a
-#   non-empty subject and NO SAN. As a non-CA with a populated subject the two
-#   CA-only lints (`basic_constraints_critical_on_ca`, `key_usage_present_when_ca`)
-#   and `san_present_if_subject_empty` all return NotApplicable, while the
-#   structural lints (version, serial, validity) pass. This keeps the certs clean
-#   under the full default registry.
+# * All non-CA leaves carry basicConstraints=CA:FALSE, extendedKeyUsage with
+#   serverAuth (unless the fixture's target is the missing-serverAuth rule), and
+#   a SAN whose dNSName matches the subject CN (unless the target requires
+#   otherwise). This keeps the BR lints quiet on every leaf except for its single
+#   intended violation.
 #
-# * Each violating fixture is otherwise a clean leaf/CA so it isolates a single
-#   rule. The CA fixtures carry a non-empty subject (SAN lint N/A) and a valid
-#   validity window / serial / version; the empty-subject fixture is a non-CA
-#   leaf (CA lints N/A) and otherwise valid.
+# * The two CA fixtures carry a non-empty subject (SAN lint N/A), a valid
+#   validity window / serial / version, and are NotApplicable for all four BR
+#   lints (CA => out of BR scope), so they keep their original far-future window
+#   and are UNCHANGED from feature 03.
 #
 # * Two malformations cannot be produced by openssl directly and are made by
 #   construction:
@@ -64,10 +134,11 @@
 #       signature no longer matches, which is irrelevant: the linter only parses
 #       structure, it does not verify signatures.
 #
-# Determinism: each fixture embeds a freshly generated RSA key, so exact bytes
+# Determinism: each fixture embeds a freshly generated RSA/EC key, so exact bytes
 # differ per run. What the tests rely on is stable: validity windows, serials,
-# subject presence, CA-ness, and extension criticality. Regenerate only when you
-# intend to refresh the committed fixtures; CI consumes the committed .pem files.
+# subject presence, CA-ness, SAN/EKU contents, and extension criticality.
+# Regenerate only when you intend to refresh the committed fixtures; CI consumes
+# the committed .pem files.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,18 +146,61 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A single shared key keeps the script fast; fixtures are self-signed and we do
 # not rely on key uniqueness across fixtures.
 KEY="$(mktemp)"
-trap 'rm -f "$KEY"' EXIT
 openssl genrsa -out "$KEY" 2048 2>/dev/null
 
-# Far-future and past validity windows (UTC, openssl 1.1.1+/3.x flags).
+# ---------------------------------------------------------------------------
+# Validity windows (UTC, openssl 1.1.1+/3.x flags).
+# ---------------------------------------------------------------------------
+# BR_OK: currently valid AND <=398 days (365d). Used by every BR-compliant leaf
+# whose target violation is NOT validity. EXPIRES 2027-06-01 — see the
+# time-fragility warning at the top of this file.
+BR_OK_NB="20260601000000Z"
+BR_OK_NA="20270601000000Z"
+
+# EXPIRED: a PAST <=398-day window (151d). Used by expired.pem so it isolates
+# ONLY hygiene_not_expired. notAfter 2024-06-01 == Unix 1_717_200_000.
+EXPIRED_NB="20240101000000Z"
+EXPIRED_NA="20240601000000Z"
+
+# VAL400: currently valid but 400 days (> 398). Used by cabf_br_validity_400_days
+# to fire ONLY cabf_br_validity_max_398_days. Also time-fragile (later horizon).
+VAL400_NB="20260601000000Z"
+VAL400_NA="20270706000000Z"
+
+# INVERTED: a zero-length window (notAfter == notBefore) at a FUTURE instant.
+# <=398d so BR validity passes; future so not_expired passes; equal bounds so
+# rfc5280_validity_not_after_after_not_before fires. Future-of-now; also slide it
+# forward if it ever falls into the past.
+INVERTED_INSTANT="20270101000000Z"
+
+# FAR_FUTURE: retained ONLY for the two CA fixtures (CA => BR N/A, so the 398-day
+# rule never applies to them and a far-future window is fine).
 FAR_FUTURE_NB="20240101000000Z"
 FAR_FUTURE_NA="21240101000000Z" # 2124 — comfortably past any test "now".
-PAST_NB="20100101000000Z"
-PAST_NA="20110101000000Z"
+
+# ---------------------------------------------------------------------------
+# Extension config builders.
+# ---------------------------------------------------------------------------
+# make_leaf_ext <out_extfile> <san_spec>
+#
+# Writes a leaf extension config (CA:FALSE + serverAuth EKU + the given SAN).
+# $san_spec is an openssl subjectAltName value, e.g. "DNS:good.example.com" or
+# "DNS:a.example.com,IP:10.0.0.1". Pass "" to omit the SAN entirely.
+make_leaf_ext() {
+  local out="$1" san_spec="$2"
+  {
+    printf 'basicConstraints=CA:FALSE\n'
+    printf 'extendedKeyUsage=serverAuth\n'
+    if [[ -n "$san_spec" ]]; then
+      printf 'subjectAltName=%s\n' "$san_spec"
+    fi
+  } >"$out"
+}
 
 # sign_csr <out.pem> <subject> <serial> <not_before> <not_after> <extfile|"">
 #
-# Self-signs a CSR built from $KEY with explicit serial / validity / extensions.
+# Self-signs a CSR built from $KEY (RSA-2048, SHA-256) with explicit serial /
+# validity / extensions.
 sign_csr() {
   local out="$1" subj="$2" serial="$3" nb="$4" na="$5" extfile="$6"
   local csr
@@ -105,61 +219,92 @@ sign_csr() {
   echo "wrote $out"
 }
 
-# Reusable extension config snippets.
-EXT_LEAF="$(mktemp)"
-printf 'basicConstraints=CA:FALSE\n' >"$EXT_LEAF"
+# --- reusable extension configs --------------------------------------------
+EXT_TMPS=()
+new_ext() {
+  local t
+  t="$(mktemp)"
+  EXT_TMPS+=("$t")
+  echo "$t"
+}
 
-EXT_CA_BC_NONCRIT="$(mktemp)"
+# CA fixtures (unchanged from feature 03).
+EXT_CA_BC_NONCRIT="$(new_ext)"
 printf 'basicConstraints=CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n' >"$EXT_CA_BC_NONCRIT"
-
-EXT_CA_NO_KCS="$(mktemp)"
+EXT_CA_NO_KCS="$(new_ext)"
 printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,digitalSignature,cRLSign\n' >"$EXT_CA_NO_KCS"
 
-trap 'rm -f "$KEY" "$EXT_LEAF" "$EXT_CA_BC_NONCRIT" "$EXT_CA_NO_KCS"' EXIT
+# Hygiene keys.
+HYG_RSA2048_KEY="$(mktemp)"
+HYG_RSA1024_KEY="$(mktemp)"
+HYG_EC_KEY="$(mktemp)"
 
-# --- Shared fixtures -------------------------------------------------------
+cleanup() {
+  rm -f "$KEY" "$HYG_RSA2048_KEY" "$HYG_RSA1024_KEY" "$HYG_EC_KEY" "${EXT_TMPS[@]}"
+}
+trap cleanup EXIT
 
-# good.pem: clean leaf — v3, non-empty subject, no SAN, CA:FALSE, far future.
-sign_csr "$HERE/good.pem"    "/CN=good.example"    17 "$FAR_FUTURE_NB" "$FAR_FUTURE_NA" "$EXT_LEAF"
+# ===========================================================================
+# Shared fixtures
+# ===========================================================================
 
-# expired.pem: same leaf shape, past notAfter — violates ONLY not_expired.
-sign_csr "$HERE/expired.pem" "/CN=expired.example" 17 "$PAST_NB"       "$PAST_NA"       "$EXT_LEAF"
+# good.pem: clean BR-compliant leaf — v3, CN=good.example.com, SAN DNS = CN,
+# serverAuth, CA:FALSE, RSA-2048/SHA-256, BR_OK window. Passes all 14 lints.
+EXT_GOOD="$(new_ext)"
+make_leaf_ext "$EXT_GOOD" "DNS:good.example.com"
+sign_csr "$HERE/good.pem" "/CN=good.example.com" 17 "$BR_OK_NB" "$BR_OK_NA" "$EXT_GOOD"
 
-# --- RFC 5280 per-lint violating fixtures ---------------------------------
+# expired.pem: BR-compliant leaf shape but PAST <=398d window — isolates ONLY
+# hygiene_not_expired.
+EXT_EXPIRED="$(new_ext)"
+make_leaf_ext "$EXT_EXPIRED" "DNS:expired.example.com"
+sign_csr "$HERE/expired.pem" "/CN=expired.example.com" 17 "$EXPIRED_NB" "$EXPIRED_NA" "$EXT_EXPIRED"
 
-# serial_number_positive: serial 0, otherwise clean leaf.
-sign_csr "$HERE/rfc5280_serial_number_zero.pem" "/CN=serial-zero.example" 0 \
-  "$FAR_FUTURE_NB" "$FAR_FUTURE_NA" "$EXT_LEAF"
+# ===========================================================================
+# RFC 5280 per-lint violating fixtures
+# ===========================================================================
 
-# validity_not_after_after_not_before: notAfter <= notBefore. openssl refuses to
-# emit a strictly inverted window ("end date before start date"), but it DOES
-# accept an empty (zero-length) window where notAfter == notBefore. The lint
-# requires notAfter to be STRICTLY later than notBefore, so an equal pair is a
-# valid violation of the rule. Both bounds are far-future (2120), so not_expired
-# still passes. Otherwise a clean leaf.
-sign_csr "$HERE/rfc5280_validity_inverted.pem" "/CN=inverted.example" 21 \
-  "21200101000000Z" "21200101000000Z" "$EXT_LEAF"
+# serial_number_positive: serial 0, otherwise BR-compliant leaf.
+EXT_SERIAL="$(new_ext)"
+make_leaf_ext "$EXT_SERIAL" "DNS:serial-zero.example.com"
+sign_csr "$HERE/rfc5280_serial_number_zero.pem" "/CN=serial-zero.example.com" 0 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_SERIAL"
+
+# validity_not_after_after_not_before: zero-length window (notAfter == notBefore)
+# at a FUTURE instant. openssl refuses a strictly inverted window but accepts an
+# equal pair; the lint requires notAfter STRICTLY later than notBefore, so an
+# equal pair violates it. Future instant => not_expired passes; zero span <=398
+# => BR validity passes. serverAuth + SAN-with-CN keep the other BR lints quiet.
+EXT_INVERTED="$(new_ext)"
+make_leaf_ext "$EXT_INVERTED" "DNS:inverted.example.com"
+sign_csr "$HERE/rfc5280_validity_inverted.pem" "/CN=inverted.example.com" 21 \
+  "$INVERTED_INSTANT" "$INVERTED_INSTANT" "$EXT_INVERTED"
 
 # basic_constraints_critical_on_ca: CA cert, BasicConstraints NOT critical, but
-# keyUsage carries keyCertSign so key_usage_present_when_ca passes.
+# keyUsage carries keyCertSign. CA => all four BR lints N/A. UNCHANGED.
 sign_csr "$HERE/rfc5280_ca_bc_not_critical.pem" "/CN=ca-bc-noncrit.example" 18 \
   "$FAR_FUTURE_NB" "$FAR_FUTURE_NA" "$EXT_CA_BC_NONCRIT"
 
 # key_usage_present_when_ca: CA cert, BasicConstraints critical CA:TRUE, keyUsage
-# present WITHOUT keyCertSign.
+# present WITHOUT keyCertSign. CA => BR N/A. UNCHANGED.
 sign_csr "$HERE/rfc5280_ca_missing_keycertsign.pem" "/CN=ca-no-kcs.example" 19 \
   "$FAR_FUTURE_NB" "$FAR_FUTURE_NA" "$EXT_CA_NO_KCS"
 
-# san_present_if_subject_empty: empty subject DN, no SAN, non-CA leaf.
+# san_present_if_subject_empty: empty subject DN, NO SAN (target), but serverAuth
+# EKU + BR_OK window ADDED. No CN => cn_in_san silent; no SAN => internal-name
+# lint silent; serverAuth present => EKU lint silent. Isolates ONLY this rule.
+EXT_EMPTY="$(new_ext)"
+make_leaf_ext "$EXT_EMPTY" "" # CA:FALSE + serverAuth, no SAN
 sign_csr "$HERE/rfc5280_empty_subject_no_san.pem" "/" 20 \
-  "$FAR_FUTURE_NB" "$FAR_FUTURE_NA" "$EXT_LEAF"
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_EMPTY"
 
-# version_is_v3: build a clean v3 leaf with extensions, then patch the DER
-# version byte from v3 (0x02) to v1 (0x00). openssl cannot emit "v1 with
-# extensions" directly, so we do it by construction (see header notes).
+# version_is_v3: build a BR-compliant v3 leaf, then patch the DER version byte
+# from v3 (0x02) to v1 (0x00). openssl cannot emit "v1 with extensions" directly.
+EXT_VERSION="$(new_ext)"
+make_leaf_ext "$EXT_VERSION" "DNS:version-v1.example.com"
 V3_TMP="$(mktemp)"
 DER_TMP="$(mktemp)"
-sign_csr "$V3_TMP" "/CN=version-v1.example" 22 "$FAR_FUTURE_NB" "$FAR_FUTURE_NA" "$EXT_LEAF"
+sign_csr "$V3_TMP" "/CN=version-v1.example.com" 22 "$BR_OK_NB" "$BR_OK_NA" "$EXT_VERSION"
 openssl x509 -in "$V3_TMP" -outform DER -out "$DER_TMP"
 
 # Locate the version field. DER layout at the start of a Certificate:
@@ -167,19 +312,16 @@ openssl x509 -in "$V3_TMP" -outform DER -out "$DER_TMP"
 #     30 LL                    SEQUENCE (TBSCertificate)
 #       A0 03 02 01 NN         [0] EXPLICIT { INTEGER version }
 # We find the "A0 03 02 01" prefix and flip the following value byte to 0x00.
-# Search within the first 32 bytes, where the version field always lives.
 patch_version_to_v1() {
   local der="$1"
   local hex
   hex="$(xxd -p -l 32 "$der" | tr -d '\n')"
-  # Offset (in hex-string chars) of the marker "a003020102".
   local marker="a003020102"
   local idx="${hex%%"$marker"*}"
   if [[ "$idx" == "$hex" ]]; then
     echo "ERROR: version marker a003020102 not found in $der" >&2
     exit 1
   fi
-  # Byte offset of the value (the 0x02 after a0 03 02 01) = chars-before/2 + 4.
   local byte_off=$(((${#idx} / 2) + 4))
   printf '\x00' | dd of="$der" bs=1 seek="$byte_off" count=1 conv=notrunc 2>/dev/null
 }
@@ -189,58 +331,83 @@ openssl x509 -inform DER -in "$DER_TMP" -outform PEM -out "$HERE/rfc5280_version
 echo "wrote $HERE/rfc5280_version_not_v3.pem (version byte patched v3 -> v1)"
 rm -f "$V3_TMP" "$DER_TMP"
 
-# --- Crypto-hygiene per-lint violating fixtures (feature 04) ---------------
+# ===========================================================================
+# Crypto-hygiene per-lint violating fixtures (feature 04)
+# ===========================================================================
 #
-# These three reuse the same clean-leaf shape (CA:FALSE via $EXT_LEAF, non-empty
-# subject, no SAN, v3, small positive serial, far-future validity) so each
-# isolates a SINGLE hygiene rule across the WHOLE registry. They cannot reuse the
-# shared $KEY / sign_csr helper unchanged because each needs a specific key or
-# digest, so they carry their own keys and inline the signing step in the same
-# style. All temp keys are cleaned up on exit alongside the earlier ones.
+# Each is a BR-compliant leaf (serverAuth + SAN-with-CN + BR_OK window) that
+# violates EXACTLY its one hygiene rule. They carry their own key/digest, so they
+# inline the signing step.
 
-HYG_RSA2048_KEY="$(mktemp)"
-HYG_RSA1024_KEY="$(mktemp)"
-HYG_EC_KEY="$(mktemp)"
-trap 'rm -f "$KEY" "$EXT_LEAF" "$EXT_CA_BC_NONCRIT" "$EXT_CA_NO_KCS" \
-      "$HYG_RSA2048_KEY" "$HYG_RSA1024_KEY" "$HYG_EC_KEY"' EXIT
-
-# sign_leaf_with <out.pem> <key> <subject> <serial> <digest>
-#
-# Self-signs a clean leaf ($EXT_LEAF, far-future validity) from an explicit key
-# with an explicit signature digest. A hygiene-specific variant of sign_csr: it
-# parameterises BOTH the signing key and the digest (sign_csr hardcodes the
-# shared RSA-2048 key and -sha256), which is exactly what these fixtures need.
+# sign_leaf_with <out.pem> <key> <subject> <serial> <digest> <extfile>
 sign_leaf_with() {
-  local out="$1" key="$2" subj="$3" serial="$4" digest="$5"
+  local out="$1" key="$2" subj="$3" serial="$4" digest="$5" extfile="$6"
   local csr
   csr="$(mktemp)"
   openssl req -new -key "$key" -subj "$subj" -out "$csr" 2>/dev/null
   openssl x509 -req -in "$csr" -signkey "$key" -out "$out" \
-    -set_serial "$serial" -not_before "$FAR_FUTURE_NB" -not_after "$FAR_FUTURE_NA" \
-    "-$digest" -extfile "$EXT_LEAF" 2>/dev/null
+    -set_serial "$serial" -not_before "$BR_OK_NB" -not_after "$BR_OK_NA" \
+    "-$digest" -extfile "$extfile" 2>/dev/null
   rm -f "$csr"
   echo "wrote $out"
 }
 
-# hygiene_no_sha1_signature: RSA-2048 key (so rsa_key_min_2048 passes; non-EC so
-# ecdsa_curve_allowlist is N/A) but SIGNED WITH SHA-1, yielding signature
-# algorithm sha1WithRSAEncryption (OID 1.2.840.113549.1.1.5). openssl 3.6.2's
-# default provider still permits RSA-SHA1 signing, so `-sha1` works directly.
+# hygiene_no_sha1_signature: RSA-2048 key but SIGNED WITH SHA-1.
+EXT_SHA1="$(new_ext)"
+make_leaf_ext "$EXT_SHA1" "DNS:sha1-sig.example.com"
 openssl genrsa -out "$HYG_RSA2048_KEY" 2048 2>/dev/null
 sign_leaf_with "$HERE/hygiene_sha1_signature.pem" "$HYG_RSA2048_KEY" \
-  "/CN=sha1-sig.example" 30 sha1
+  "/CN=sha1-sig.example.com" 30 sha1 "$EXT_SHA1"
 
-# hygiene_rsa_key_min_2048: RSA-1024 key (below the 2048-bit floor) with a
-# SHA-256 signature (so no_sha1_signature passes; non-EC so ecdsa lint is N/A).
+# hygiene_rsa_key_min_2048: RSA-1024 key, SHA-256 signature.
+EXT_RSA1024="$(new_ext)"
+make_leaf_ext "$EXT_RSA1024" "DNS:rsa-1024.example.com"
 openssl genrsa -out "$HYG_RSA1024_KEY" 1024 2>/dev/null
 sign_leaf_with "$HERE/hygiene_rsa_1024.pem" "$HYG_RSA1024_KEY" \
-  "/CN=rsa-1024.example" 31 sha256
+  "/CN=rsa-1024.example.com" 31 sha256 "$EXT_RSA1024"
 
-# hygiene_ecdsa_curve_allowlist: EC key on secp224r1 (NIST P-224, OID
-# 1.3.132.0.33) — a recognised NAMED curve that is NOT on the {P-256,P-384,P-521}
-# allowlist, so the lint fires on the "not allowlisted" path (not the
-# fail-closed "no named curve" path). Signed ecdsa-with-SHA256, so the SHA-1 lint
-# passes; an EC key makes rsa_key_min_2048 N/A.
+# hygiene_ecdsa_curve_allowlist: EC key on secp224r1 (NIST P-224), SHA-256 sig.
+EXT_ECDSA="$(new_ext)"
+make_leaf_ext "$EXT_ECDSA" "DNS:ec-bad-curve.example.com"
 openssl ecparam -name secp224r1 -genkey -noout -out "$HYG_EC_KEY" 2>/dev/null
 sign_leaf_with "$HERE/hygiene_ecdsa_bad_curve.pem" "$HYG_EC_KEY" \
-  "/CN=ec-bad-curve.example" 32 sha256
+  "/CN=ec-bad-curve.example.com" 32 sha256 "$EXT_ECDSA"
+
+# ===========================================================================
+# CA/Browser Forum BR per-lint violating fixtures (feature 05)
+# ===========================================================================
+#
+# Each is a BR-compliant leaf EXCEPT its one target BR violation, and passes all
+# rfc5280 + hygiene lints (RSA-2048/SHA-256, v3, positive serial, CA:FALSE).
+
+# cabf_br_validity_max_398_days: 400d currently-valid window. serverAuth + SAN.
+EXT_VAL400="$(new_ext)"
+make_leaf_ext "$EXT_VAL400" "DNS:validity-400.example.com"
+sign_csr "$HERE/cabf_br_validity_400_days.pem" "/CN=validity-400.example.com" 40 \
+  "$VAL400_NB" "$VAL400_NA" "$EXT_VAL400"
+
+# cabf_br_cn_in_san: CN present but ABSENT from the SAN (SAN lists a different
+# public name). serverAuth + BR_OK. Isolates ONLY cabf_br_cn_in_san.
+EXT_CNMISS="$(new_ext)"
+make_leaf_ext "$EXT_CNMISS" "DNS:other.example.com"
+sign_csr "$HERE/cabf_br_cn_not_in_san.pem" "/CN=cn-missing.example.com" 41 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_CNMISS"
+
+# cabf_br_no_internal_names_or_reserved_ip: CN=public.example.com IS in the SAN
+# as a public name (cn_in_san quiet) PLUS an internal name AND a reserved IP, so
+# the target lint fires with MULTIPLE findings.
+EXT_INTERNAL="$(new_ext)"
+make_leaf_ext "$EXT_INTERNAL" "DNS:public.example.com,DNS:internal.local,IP:10.0.0.1"
+sign_csr "$HERE/cabf_br_internal_san.pem" "/CN=public.example.com" 42 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_INTERNAL"
+
+# cabf_br_ext_key_usage_server_auth_present: EKU PRESENT but WITHOUT serverAuth
+# (clientAuth only). SAN-with-CN + BR_OK keep the other BR lints quiet.
+EXT_NOSA="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=clientAuth\n'
+  printf 'subjectAltName=DNS:no-serverauth.example.com\n'
+} >"$EXT_NOSA"
+sign_csr "$HERE/cabf_br_missing_serverauth.pem" "/CN=no-serverauth.example.com" 43 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_NOSA"

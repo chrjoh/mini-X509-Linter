@@ -35,11 +35,16 @@ use linter::{
 // workspace-root `testdata/` directory.
 const EXPIRED_PEM: &[u8] = include_bytes!("../../../testdata/expired.pem");
 
-/// The `notAfter` of `testdata/expired.pem` in Unix seconds (2011-01-01).
+/// The `notAfter` of `testdata/expired.pem` in Unix seconds (2024-06-01).
+///
+/// Feature 05 reshaped `expired.pem` to a BR-compliant-but-past leaf with a
+/// `2024-01-01 -> 2024-06-01` window (so it isolates ONLY `hygiene_not_expired`
+/// under broad BR scoping); `notAfter` is therefore `1_717_200_000` rather than
+/// the old `1_293_840_000` (2011-01-01).
 ///
 /// The full expiry message embeds the *current* time (`now is <unix time>`),
 /// which changes every run, so tests match only this stable prefix.
-const EXPIRED_NOT_AFTER: i64 = 1_293_840_000;
+const EXPIRED_NOT_AFTER: i64 = 1_717_200_000;
 
 /// Loads the single leaf certificate from a PEM fixture; `unwrap` surfaces the
 /// `CertError` if the fixture is malformed.
