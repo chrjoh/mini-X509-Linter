@@ -2,7 +2,7 @@
 agent: developer
 seq: 5
 title: CertPurpose enum + purpose→RuleSource resolver (linter crate)
-status: pending
+status: done
 touches:
   - crates/linter/src/registry.rs
 depends_on: []

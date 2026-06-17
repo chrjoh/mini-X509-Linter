@@ -2,7 +2,7 @@
 agent: tester
 seq: 4
 title: Golden-file test + exit-code tests + chain fixture
-status: pending
+status: done
 touches:
   - testdata/chain_bundle.pem
   - testdata/leaf_no_server_auth.pem
@@ -35,7 +35,8 @@ behaviour against the real binary.
 ## Steps
 
 1. Add `insta` as a `[dev-dependencies]` entry in `crates/cli/Cargo.toml` (snapshot test
-   tooling is introduced here, per the feature plan).
+   tooling is introduced here, per the feature plan). Pin to `insta = "1"` — latest stable 1.48.0
+   (pinned on 2026-06-17, verified against crates.io).
 2. `testdata/chain_bundle.pem` — concatenate a leaf + an intermediate (reuse existing
    fixtures where possible) to exercise `--chain`.
 3. `crates/cli/tests/golden.rs`:

@@ -1,0 +1,20 @@
+---
+source: crates/cli/tests/golden.rs
+expression: out
+---
+Certificate 1 (leaf)
+[rfc5280]
+  (3 passed, 3 not applicable)
+[cabf_br]
+  (4 passed, 0 not applicable)
+[hygiene]
+  (3 passed, 1 not applicable)
+OK: no findings
+
+Certificate 2
+[rfc5280]
+  (5 passed, 1 not applicable)
+[hygiene]
+  (3 passed, 1 not applicable)
+OK: no findings
+summary: no findings

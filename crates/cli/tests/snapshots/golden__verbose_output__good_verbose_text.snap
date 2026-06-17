@@ -1,0 +1,24 @@
+---
+source: crates/cli/tests/golden.rs
+expression: out
+---
+purpose: tls-server (auto)
+[rfc5280]
+  n/a   rfc5280_basic_constraints_critical_on_ca
+  n/a   rfc5280_key_usage_present_when_ca
+  n/a   rfc5280_san_present_if_subject_empty
+  pass  rfc5280_serial_number_positive
+  pass  rfc5280_validity_not_after_after_not_before
+  pass  rfc5280_version_is_v3
+[cabf_br]
+  pass  cabf_br_cn_in_san
+  pass  cabf_br_ext_key_usage_server_auth_present
+  pass  cabf_br_no_internal_names_or_reserved_ip
+  pass  cabf_br_validity_max_398_days
+[hygiene]
+  n/a   hygiene_ecdsa_curve_allowlist
+  pass  hygiene_no_sha1_signature
+  pass  hygiene_not_expired
+  pass  hygiene_rsa_key_min_2048
+OK: no findings
+summary: no findings

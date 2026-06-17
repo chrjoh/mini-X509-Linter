@@ -2,7 +2,7 @@
 agent: developer
 seq: 1
 title: Polished text formatter + chain rendering + counts
-status: pending
+status: done
 touches:
   - crates/cli/src/output.rs
 depends_on: []

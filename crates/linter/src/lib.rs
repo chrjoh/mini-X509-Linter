@@ -29,7 +29,7 @@ mod source;
 
 pub use cert::Cert;
 pub use finding::{Applicability, Finding, LintOutcome, Severity};
-pub use registry::{Registry, default_registry};
+pub use registry::{CertPurpose, Registry, default_registry};
 pub use source::RuleSource;
 
 /// A single certificate-linting rule.

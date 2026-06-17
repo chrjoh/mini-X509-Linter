@@ -101,6 +101,135 @@ impl Default for Registry {
     }
 }
 
+/// The intended purpose of a certificate, used to scope which lint
+/// [`RuleSource`]s apply to it.
+///
+/// The CA/Browser Forum Baseline Requirements ([`RuleSource::CabfBr`]) are
+/// TLS-server-specific. Running them against a certificate that is not a TLS
+/// server (for example a clientAuth- or keyEncipherment-only leaf) produces
+/// false positives. A `CertPurpose` resolves to an allowed set of sources via
+/// [`allowed_sources`](CertPurpose::allowed_sources); the engine then runs only
+/// those sources through [`Registry::run_filtered`].
+///
+/// This is a *filtering* abstraction only: it changes which sources run, never
+/// any lint's logic or [`applies`](crate::Lint::applies) rule.
+///
+/// # Future variants
+///
+/// `Client`, `Smime`, and `CodeSigning` are planned but **not yet implemented**.
+/// Until dedicated rule sets exist for them they would resolve to the same set
+/// as [`Generic`](CertPurpose::Generic) (RFC 5280 + Hygiene, skipping
+/// `CabfBr`). They are documented here so that adding them later is purely
+/// additive — no rename of the three shipped variants is required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertPurpose {
+    /// Resolve the purpose per certificate from a heuristic: if the leaf asserts
+    /// the serverAuth EKU it is treated as [`TlsServer`](CertPurpose::TlsServer),
+    /// otherwise as [`Generic`](CertPurpose::Generic). See
+    /// [`allowed_sources`](CertPurpose::allowed_sources) for the fail-closed
+    /// behaviour on a parse error.
+    Auto,
+    /// A publicly-trusted TLS server certificate: all current sources apply,
+    /// including the TLS-server-specific [`RuleSource::CabfBr`] set. Forcing this
+    /// purpose runs `CabfBr` even when the serverAuth EKU is absent.
+    TlsServer,
+    /// A certificate with no TLS-server profile: only the
+    /// standard-and-hygiene sources apply ([`RuleSource::Rfc5280`] and
+    /// [`RuleSource::Hygiene`]); the TLS-server-specific [`RuleSource::CabfBr`]
+    /// set is skipped.
+    Generic,
+}
+
+/// The allowed-source set for a TLS-server certificate: every current source.
+///
+/// Both [`CertPurpose::TlsServer`] and an `Auto` purpose that resolves to
+/// tls-server return this exact set, so the two paths stay in sync. Ordering is
+/// fixed (`Rfc5280, Hygiene, CabfBr`) for deterministic downstream output.
+fn tls_server_sources() -> Vec<RuleSource> {
+    vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+}
+
+/// The allowed-source set for a non-TLS-server certificate: standard and
+/// hygiene only, skipping the TLS-server-specific [`RuleSource::CabfBr`].
+///
+/// Both [`CertPurpose::Generic`] and an `Auto` purpose that resolves to generic
+/// (including the fail-closed error path) return this exact set. Ordering is
+/// fixed (`Rfc5280, Hygiene`) for deterministic downstream output.
+fn generic_sources() -> Vec<RuleSource> {
+    vec![RuleSource::Rfc5280, RuleSource::Hygiene]
+}
+
+/// Maps the result of [`Cert::has_server_auth`] to an allowed-source set.
+///
+/// This is the pure decision behind [`CertPurpose::Auto`], factored out so the
+/// `Ok(false)` and `Err(..)` branches are unit-testable without a fixture:
+///
+/// - `Ok(true)`  → [`tls_server_sources`] (includes `CabfBr`).
+/// - `Ok(false)` → [`generic_sources`] (skips `CabfBr`).
+/// - `Err(..)`   → [`generic_sources`] — **fail closed**: a defensive parse
+///   failure must never manufacture a Baseline Requirements false positive, so
+///   the TLS-server-specific source is dropped.
+fn auto_sources_from(has_server_auth: Result<bool, crate::cert::CertError>) -> Vec<RuleSource> {
+    match has_server_auth {
+        Ok(true) => tls_server_sources(),
+        Ok(false) | Err(_) => generic_sources(),
+    }
+}
+
+impl CertPurpose {
+    /// The set of [`RuleSource`]s this purpose allows for `cert`.
+    ///
+    /// The returned ordering is stable (always `Rfc5280, Hygiene, CabfBr` for the
+    /// tls-server set; `Rfc5280, Hygiene` for the generic set) so downstream
+    /// output stays deterministic. The CLI intersects this set with its
+    /// `--source` selection and passes the result to [`Registry::run_filtered`].
+    ///
+    /// - [`TlsServer`](CertPurpose::TlsServer) → `[Rfc5280, Hygiene, CabfBr]`.
+    /// - [`Generic`](CertPurpose::Generic) → `[Rfc5280, Hygiene]`.
+    /// - [`Auto`](CertPurpose::Auto) → resolved per cert via
+    ///   [`Cert::has_server_auth`]: `Ok(true)` yields the tls-server set,
+    ///   `Ok(false)` the generic set, and `Err(..)` **fails closed** to the
+    ///   generic set (skipping `CabfBr`) so a defensive parse failure cannot
+    ///   manufacture a Baseline Requirements false positive. This resolver never
+    ///   panics and never propagates the error.
+    ///
+    /// `Auto` is a documented **heuristic**: a leaf with no EKU, or one that does
+    /// not assert serverAuth, resolves to `generic`. Forcing
+    /// [`TlsServer`](CertPurpose::TlsServer) runs the `CabfBr` set even when the
+    /// serverAuth EKU is absent.
+    pub fn allowed_sources(self, cert: &Cert) -> Vec<RuleSource> {
+        match self {
+            CertPurpose::TlsServer => tls_server_sources(),
+            CertPurpose::Generic => generic_sources(),
+            CertPurpose::Auto => auto_sources_from(cert.has_server_auth()),
+        }
+    }
+
+    /// Resolves this purpose to a concrete, non-`Auto` purpose for `cert`.
+    ///
+    /// [`TlsServer`](CertPurpose::TlsServer) and [`Generic`](CertPurpose::Generic)
+    /// resolve to themselves. [`Auto`](CertPurpose::Auto) resolves to
+    /// [`TlsServer`](CertPurpose::TlsServer) when the leaf asserts serverAuth and
+    /// to [`Generic`](CertPurpose::Generic) otherwise — including the fail-closed
+    /// `Err(..)` path, matching [`allowed_sources`](CertPurpose::allowed_sources).
+    ///
+    /// The CLI uses this for the verbose `purpose:` header (for example
+    /// `purpose: generic (auto)`), reporting which concrete purpose `auto`
+    /// landed on. The result is consistent with `allowed_sources`: the returned
+    /// purpose's `allowed_sources` equals this purpose's `allowed_sources` for
+    /// the same cert.
+    pub fn resolve(self, cert: &Cert) -> CertPurpose {
+        match self {
+            CertPurpose::TlsServer => CertPurpose::TlsServer,
+            CertPurpose::Generic => CertPurpose::Generic,
+            CertPurpose::Auto => match cert.has_server_auth() {
+                Ok(true) => CertPurpose::TlsServer,
+                Ok(false) | Err(_) => CertPurpose::Generic,
+            },
+        }
+    }
+}
+
 /// Evaluates a single lint against `cert`, honouring the applicability gate.
 ///
 /// Kept as a free function so both [`Registry::run`] and
@@ -606,6 +735,111 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
         #[test]
         fn default_trait_matches_default_registry() {
             assert_eq!(Registry::default().len(), default_registry().len());
+        }
+    }
+
+    mod cert_purpose {
+        use super::*;
+        use crate::cert::CertError;
+
+        /// Loads the workspace `testdata/good.pem` fixture, whose leaf asserts
+        /// the serverAuth EKU (feature 05).
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).expect("good.pem fixture must exist");
+            let mut certs = Cert::from_pem(&bytes).expect("good.pem must parse");
+            certs.pop().expect("good.pem must contain one cert")
+        }
+
+        #[test]
+        fn tls_server_includes_cabf_br() {
+            // Setup
+            let cert = sample_cert();
+
+            // Invoke
+            let sources = CertPurpose::TlsServer.allowed_sources(&cert);
+
+            // Expect: all three current sources, stable order, CabfBr present.
+            assert_eq!(
+                sources,
+                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+            );
+            assert!(sources.contains(&RuleSource::CabfBr));
+        }
+
+        #[test]
+        fn generic_omits_cabf_br() {
+            // Setup
+            let cert = sample_cert();
+
+            // Invoke
+            let sources = CertPurpose::Generic.allowed_sources(&cert);
+
+            // Expect: only standard + hygiene, no CabfBr.
+            assert_eq!(sources, vec![RuleSource::Rfc5280, RuleSource::Hygiene]);
+            assert!(!sources.contains(&RuleSource::CabfBr));
+        }
+
+        #[test]
+        fn auto_on_server_auth_leaf_includes_cabf_br() {
+            // Setup: good.pem asserts the serverAuth EKU.
+            let cert = good_cert();
+            assert!(
+                cert.has_server_auth().expect("good.pem re-parses"),
+                "fixture precondition: good.pem must assert serverAuth"
+            );
+
+            // Invoke
+            let sources = CertPurpose::Auto.allowed_sources(&cert);
+
+            // Expect: resolves to the tls-server set incl. CabfBr.
+            assert_eq!(
+                sources,
+                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+            );
+            assert_eq!(CertPurpose::Auto.resolve(&cert), CertPurpose::TlsServer);
+        }
+
+        #[test]
+        fn auto_on_non_server_auth_resolves_to_generic_set() {
+            // The pure decision: Ok(false) (a leaf without serverAuth) drops
+            // CabfBr. Tested via the helper so no non-serverAuth fixture is
+            // required (task 04 adds one later).
+            let sources = auto_sources_from(Ok(false));
+
+            assert_eq!(sources, vec![RuleSource::Rfc5280, RuleSource::Hygiene]);
+            assert!(!sources.contains(&RuleSource::CabfBr));
+        }
+
+        #[test]
+        fn auto_fails_closed_to_generic_on_error() {
+            // The fail-closed decision: Err(..) must drop CabfBr so a defensive
+            // parse failure cannot manufacture a BR false positive.
+            let sources = auto_sources_from(Err(CertError::Der));
+
+            assert_eq!(sources, vec![RuleSource::Rfc5280, RuleSource::Hygiene]);
+            assert!(!sources.contains(&RuleSource::CabfBr));
+        }
+
+        #[test]
+        fn auto_tls_server_set_matches_explicit_tls_server() {
+            // The Auto-resolved-to-tls-server and explicit TlsServer sets stay in
+            // sync (shared helper).
+            let cert = good_cert();
+            assert_eq!(
+                CertPurpose::Auto.allowed_sources(&cert),
+                CertPurpose::TlsServer.allowed_sources(&cert)
+            );
+        }
+
+        #[test]
+        fn explicit_purposes_resolve_to_themselves() {
+            let cert = sample_cert();
+            assert_eq!(
+                CertPurpose::TlsServer.resolve(&cert),
+                CertPurpose::TlsServer
+            );
+            assert_eq!(CertPurpose::Generic.resolve(&cert), CertPurpose::Generic);
         }
     }
 }

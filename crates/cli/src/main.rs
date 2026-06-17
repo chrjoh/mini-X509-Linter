@@ -2,28 +2,47 @@
 //!
 //! Reads a certificate file, loads it via the [`Cert`] facade (auto-detecting
 //! PEM vs DER), runs every applicable lint from the [`default_registry`] against
-//! the leaf certificate, and reports the outcomes as text (grouped by
-//! [`RuleSource`]) or nested JSON.
+//! the leaf certificate (or, with `--chain`, against every certificate in the
+//! input), and reports the outcomes as text (grouped by [`RuleSource`]) or
+//! nested JSON.
 //!
-//! Three flags shape the report:
+//! Flags that shape the report:
 //!
 //! - `--format <text|json>` — output format (default `text`).
 //! - `--source <list>` — comma-separated subset of `rfc5280,cabf_br,hygiene`
 //!   (default: all sources).
 //! - `--min-severity <notice|warn|error|fatal>` — hide findings below the given
 //!   level (default `notice`).
+//! - `--fail-on <notice|warn|error|fatal>` — exit non-zero if any surfaced
+//!   finding (after `--min-severity` filtering) is at or above this level
+//!   (default `error`). This drives the process exit code so the tool is usable
+//!   in CI / pre-commit hooks.
+//! - `--chain` — treat the input as a chain / bundle: every certificate is
+//!   linted and reported under its own label (full chain-aware lints are a
+//!   post-v1 stretch). Without it, only the leaf (first certificate) is linted.
+//! - `--verbose` / `-v` — opt-in per-lint text listing. Affects `--format text`
+//!   only; `--format json` already emits every lint and is unchanged. Does not
+//!   affect the exit code.
+//! - `--purpose <auto|tls-server|generic>` — scopes which lint **sources** apply
+//!   based on the certificate's intended purpose (default `auto`). It maps to a
+//!   [`linter::CertPurpose`] whose allowed-source set is intersected with
+//!   `--source`; the engine then runs only the resulting sources. `auto`
+//!   resolves per certificate from its serverAuth EKU.
 //!
-//! Exit codes by severity are a later feature (06); this binary returns success
-//! once the certificate loads and lints run.
+//! Exit code: `0` when no surfaced finding reaches `--fail-on`; `1` when one
+//! does. A load/parse/usage error exits non-zero via the process error path.
 
 mod output;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use linter::{Cert, RuleSource, Severity, default_registry};
+use linter::{Cert, CertPurpose, RuleSource, Severity, default_registry};
+
+use output::{CertReport, PurposeHeader, Verbosity};
 
 /// Output format for the lint report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -34,29 +53,65 @@ enum Format {
     Json,
 }
 
-/// `--min-severity` levels, mirroring [`linter::Severity`].
+/// `--min-severity` / `--fail-on` levels, mirroring [`linter::Severity`].
 ///
 /// A dedicated CLI enum keeps the on-wire flag vocabulary owned by the binary
 /// and decoupled from the library type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum MinSeverity {
-    /// Show everything (notice and above).
+enum SeverityLevel {
+    /// Notice and above.
     Notice,
-    /// Show warn and above.
+    /// Warn and above.
     Warn,
-    /// Show error and above.
+    /// Error and above.
     Error,
-    /// Show fatal only.
+    /// Fatal only.
     Fatal,
 }
 
-impl From<MinSeverity> for Severity {
-    fn from(value: MinSeverity) -> Self {
+impl From<SeverityLevel> for Severity {
+    fn from(value: SeverityLevel) -> Self {
         match value {
-            MinSeverity::Notice => Severity::Notice,
-            MinSeverity::Warn => Severity::Warn,
-            MinSeverity::Error => Severity::Error,
-            MinSeverity::Fatal => Severity::Fatal,
+            SeverityLevel::Notice => Severity::Notice,
+            SeverityLevel::Warn => Severity::Warn,
+            SeverityLevel::Error => Severity::Error,
+            SeverityLevel::Fatal => Severity::Fatal,
+        }
+    }
+}
+
+/// `--purpose` values, mirroring [`linter::CertPurpose`].
+///
+/// A dedicated CLI enum keeps the flag vocabulary owned by the binary; the
+/// purpose → source mapping itself lives in the linter crate
+/// ([`CertPurpose::allowed_sources`]) so it is unit-testable and not duplicated
+/// here.
+///
+/// # Future variants
+///
+/// `client`, `smime`, and `code-signing` are reserved as planned future values
+/// but are **not implemented**: until dedicated rule sets exist they would
+/// behave like [`generic`](CliPurpose::Generic). Adding them later is purely
+/// additive (no rename of the three shipped variants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliPurpose {
+    /// Resolve per certificate from its serverAuth EKU: serverAuth →
+    /// tls-server, otherwise → generic.
+    Auto,
+    /// A publicly-trusted TLS server certificate: all sources, including the
+    /// TLS-server-specific `cabf_br` set.
+    TlsServer,
+    /// A certificate with no TLS-server profile: `rfc5280` + `hygiene` only,
+    /// skipping the `cabf_br` set.
+    Generic,
+}
+
+impl From<CliPurpose> for CertPurpose {
+    fn from(value: CliPurpose) -> Self {
+        match value {
+            CliPurpose::Auto => CertPurpose::Auto,
+            CliPurpose::TlsServer => CertPurpose::TlsServer,
+            CliPurpose::Generic => CertPurpose::Generic,
         }
     }
 }
@@ -82,12 +137,32 @@ struct Args {
     source: Option<String>,
 
     /// Only surface findings at or above this severity.
-    #[arg(long, value_enum, default_value_t = MinSeverity::Notice)]
-    min_severity: MinSeverity,
+    #[arg(long, value_enum, default_value_t = SeverityLevel::Notice)]
+    min_severity: SeverityLevel,
+
+    /// Exit non-zero if any surfaced finding is at or above this severity.
+    #[arg(long, value_enum, default_value_t = SeverityLevel::Error)]
+    fail_on: SeverityLevel,
+
+    /// Treat the input as a chain / bundle: lint and report every certificate.
+    #[arg(long)]
+    chain: bool,
+
+    /// List every lint individually in text output (instead of a collapsed
+    /// summary). Affects `--format text` only.
+    #[arg(long, short = 'v')]
+    verbose: bool,
+
+    /// Scope which lint sources apply to the certificate's intended purpose.
+    #[arg(long, value_enum, default_value_t = CliPurpose::Auto)]
+    purpose: CliPurpose,
 }
 
 /// The full set of sources, used when `--source` is omitted.
 const ALL_SOURCES: [RuleSource; 3] = [RuleSource::Rfc5280, RuleSource::CabfBr, RuleSource::Hygiene];
+
+/// Process exit code returned when a surfaced finding reaches `--fail-on`.
+const EXIT_FINDINGS: u8 = 1;
 
 /// Parses a single `--source` token into a [`RuleSource`].
 fn parse_source_token(token: &str) -> Result<RuleSource> {
@@ -126,59 +201,239 @@ fn select_sources(source: Option<&str>) -> Result<Vec<RuleSource>> {
     Ok(sources)
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-    run(&args)
+/// Computes the effective source set for `cert`: the purpose-allowed sources
+/// intersected with the user's `--source` selection.
+///
+/// Ordering follows the purpose-allowed set (which is itself stable), so the
+/// engine output stays deterministic. An empty intersection is valid and simply
+/// runs nothing from the excluded sources.
+fn effective_sources(
+    purpose: CertPurpose,
+    cert: &Cert,
+    selected: &[RuleSource],
+) -> Vec<RuleSource> {
+    purpose
+        .allowed_sources(cert)
+        .into_iter()
+        .filter(|source| selected.contains(source))
+        .collect()
 }
 
-/// Loads the certificate, runs the selected lints, and prints the report.
+/// The stable label for a resolved [`CertPurpose`], used by the verbose header.
+fn purpose_label(purpose: CertPurpose) -> &'static str {
+    match purpose {
+        CertPurpose::TlsServer => "tls-server",
+        CertPurpose::Generic => "generic",
+        // `Auto` is always resolved before labelling; treat defensively.
+        CertPurpose::Auto => "auto",
+    }
+}
+
+/// Builds the verbose-only purpose header for `cert`.
+///
+/// `resolved` is the concrete purpose `--purpose` landed on (resolving `auto`
+/// per cert); `from_auto` records whether the user supplied `auto`.
+fn build_purpose_header(
+    cli_purpose: CliPurpose,
+    purpose: CertPurpose,
+    cert: &Cert,
+) -> PurposeHeader {
+    PurposeHeader {
+        resolved: purpose_label(purpose.resolve(cert)).to_string(),
+        from_auto: cli_purpose == CliPurpose::Auto,
+    }
+}
+
+fn main() -> ExitCode {
+    let args = Args::parse();
+    match run(&args) {
+        Ok(code) => code,
+        Err(err) => {
+            // Generic, single-line error (no stack trace). The `{:#}` form
+            // chains the anyhow context messages.
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Loads the certificate(s), runs the selected lints, prints the report, and
+/// returns the process exit code derived from `--fail-on`.
 ///
 /// # Errors
 ///
 /// Returns an error if the file cannot be read, its contents cannot be parsed as
 /// one or more X.509 certificates, the `--source` value is invalid, or the
 /// report cannot be serialized.
-fn run(args: &Args) -> Result<()> {
-    let sources = select_sources(args.source.as_deref())?;
-
-    let leaf = load_leaf(&args.path)?;
-
-    let registry = default_registry();
-    let outcomes = registry.run_filtered(&leaf, &sources);
-
+fn run(args: &Args) -> Result<ExitCode> {
+    let selected = select_sources(args.source.as_deref())?;
+    let purpose: CertPurpose = args.purpose.into();
     let min: Severity = args.min_severity.into();
-    let report = match args.format {
-        Format::Text => output::render_text(&outcomes, min),
-        Format::Json => {
-            let mut json = output::render_json(&outcomes, min)?;
-            json.push('\n');
-            json
-        }
+    let fail_on: Severity = args.fail_on.into();
+    let verbosity = if args.verbose {
+        Verbosity::PerLint
+    } else {
+        Verbosity::Summary
     };
 
-    print!("{report}");
-    Ok(())
+    let certs = load_certs(&args.path)?;
+    let registry = default_registry();
+
+    // The purpose header is resolved against the leaf (the cert that anchors the
+    // run); in chain mode each cert is still filtered against its own resolution.
+    let leaf = &certs[0];
+    let header = build_purpose_header(args.purpose, purpose, leaf);
+
+    if args.chain {
+        run_chain(
+            &certs,
+            &registry,
+            purpose,
+            &selected,
+            min,
+            fail_on,
+            verbosity,
+            &header,
+            args.format,
+        )
+    } else {
+        let effective = effective_sources(purpose, leaf, &selected);
+        let outcomes = registry.run_filtered(leaf, &effective);
+
+        let report = match args.format {
+            Format::Text => output::render_text_opts(&outcomes, min, verbosity, Some(&header)),
+            Format::Json => {
+                let mut json = output::render_json(&outcomes, min)?;
+                json.push('\n');
+                json
+            }
+        };
+        print!("{report}");
+
+        let counts = output::severity_counts(&outcomes, min);
+        Ok(exit_code(counts, fail_on))
+    }
 }
 
-/// Reads `path` and returns the leaf (first) certificate.
+/// Lints and renders every certificate in the input as a chain.
+#[allow(clippy::too_many_arguments)]
+fn run_chain(
+    certs: &[Cert],
+    registry: &linter::Registry,
+    purpose: CertPurpose,
+    selected: &[RuleSource],
+    min: Severity,
+    fail_on: Severity,
+    verbosity: Verbosity,
+    header: &PurposeHeader,
+    format: Format,
+) -> Result<ExitCode> {
+    // Lint every cert, resolving `auto` against each cert in turn.
+    let per_cert: Vec<(String, Vec<linter::LintOutcome>)> = certs
+        .iter()
+        .enumerate()
+        .map(|(idx, cert)| {
+            let label = if idx == 0 {
+                "Certificate 1 (leaf)".to_string()
+            } else {
+                format!("Certificate {}", idx + 1)
+            };
+            let effective = effective_sources(purpose, cert, selected);
+            (label, registry.run_filtered(cert, &effective))
+        })
+        .collect();
+
+    match format {
+        Format::Text => {
+            let reports: Vec<CertReport<'_>> = per_cert
+                .iter()
+                .map(|(label, outcomes)| CertReport::new(label, outcomes))
+                .collect();
+            let report = output::render_text_chain(&reports, min, verbosity, Some(header));
+            print!("{report}");
+        }
+        Format::Json => {
+            let json = render_chain_json(&per_cert, min)?;
+            println!("{json}");
+        }
+    }
+
+    // Exit code: fail if any cert has a surfaced finding at/above `fail_on`.
+    let mut worst_triggers = false;
+    for (_, outcomes) in &per_cert {
+        let counts = output::severity_counts(outcomes, min);
+        if exit_code(counts, fail_on) != ExitCode::SUCCESS {
+            worst_triggers = true;
+        }
+    }
+    Ok(if worst_triggers {
+        ExitCode::from(EXIT_FINDINGS)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// Renders the chain as a JSON array of `{ "certificate": <label>, "outcomes":
+/// [...] }` objects, one per certificate, in chain order. The `outcomes` array
+/// uses the same nested shape as the single-cert JSON output.
+///
+/// # Errors
+///
+/// Returns an error if serialization fails.
+fn render_chain_json(
+    per_cert: &[(String, Vec<linter::LintOutcome>)],
+    min: Severity,
+) -> Result<String> {
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(per_cert.len());
+    for (label, outcomes) in per_cert {
+        // Reuse the single-cert renderer for the per-cert outcomes shape, then
+        // re-parse so the whole document is one valid JSON array.
+        let outcomes_json = output::render_json(outcomes, min)?;
+        let outcomes_value: serde_json::Value = serde_json::from_str(&outcomes_json)
+            .context("failed to re-parse per-cert outcomes JSON")?;
+        entries.push(serde_json::json!({
+            "certificate": label,
+            "outcomes": outcomes_value,
+        }));
+    }
+    serde_json::to_string_pretty(&entries).context("failed to serialize chain JSON")
+}
+
+/// Maps the surfaced severity counts to a process exit code given `--fail-on`.
+///
+/// Returns [`ExitCode::FAILURE`]-equivalent ([`EXIT_FINDINGS`]) when any count
+/// at or above `fail_on` is non-zero, otherwise [`ExitCode::SUCCESS`].
+fn exit_code(counts: output::SeverityCounts, fail_on: Severity) -> ExitCode {
+    let triggered = match fail_on {
+        Severity::Fatal => counts.fatal > 0,
+        Severity::Error => counts.fatal > 0 || counts.error > 0,
+        Severity::Warn => counts.fatal > 0 || counts.error > 0 || counts.warn > 0,
+        Severity::Notice => counts.total() > 0,
+    };
+    if triggered {
+        ExitCode::from(EXIT_FINDINGS)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Reads `path` and returns every certificate it contains, in input order.
 ///
 /// # Errors
 ///
 /// Returns an error if the file cannot be read or parsed, or if it contains no
 /// certificates.
-fn load_leaf(path: &Path) -> Result<Cert> {
+fn load_certs(path: &Path) -> Result<Vec<Cert>> {
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read certificate file: {}", path.display()))?;
 
-    let mut certs = Cert::load(&bytes)
+    let certs = Cert::load(&bytes)
         .with_context(|| format!("failed to parse certificate(s) from: {}", path.display()))?;
 
     if certs.is_empty() {
         bail!("no certificates found in the input file");
     }
-    // The leaf is the first certificate in the input. Remove and return it to
-    // hand back an owned `Cert` without cloning.
-    Ok(certs.remove(0))
+    Ok(certs)
 }
 
 #[cfg(test)]
@@ -217,15 +472,156 @@ mod tests {
         }
     }
 
-    mod min_severity_conversion {
+    mod severity_level_conversion {
         use super::*;
 
         #[test]
         fn maps_each_variant() {
-            assert_eq!(Severity::from(MinSeverity::Notice), Severity::Notice);
-            assert_eq!(Severity::from(MinSeverity::Warn), Severity::Warn);
-            assert_eq!(Severity::from(MinSeverity::Error), Severity::Error);
-            assert_eq!(Severity::from(MinSeverity::Fatal), Severity::Fatal);
+            assert_eq!(Severity::from(SeverityLevel::Notice), Severity::Notice);
+            assert_eq!(Severity::from(SeverityLevel::Warn), Severity::Warn);
+            assert_eq!(Severity::from(SeverityLevel::Error), Severity::Error);
+            assert_eq!(Severity::from(SeverityLevel::Fatal), Severity::Fatal);
+        }
+    }
+
+    mod cli_purpose_conversion {
+        use super::*;
+
+        #[test]
+        fn maps_each_variant() {
+            assert_eq!(CertPurpose::from(CliPurpose::Auto), CertPurpose::Auto);
+            assert_eq!(
+                CertPurpose::from(CliPurpose::TlsServer),
+                CertPurpose::TlsServer
+            );
+            assert_eq!(CertPurpose::from(CliPurpose::Generic), CertPurpose::Generic);
+        }
+    }
+
+    mod effective_sources {
+        use super::*;
+
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).expect("good.pem fixture must exist");
+            let mut certs = Cert::load(&bytes).expect("good.pem must parse");
+            certs.remove(0)
+        }
+
+        #[test]
+        fn tls_server_with_all_sources_keeps_all() {
+            let cert = good_cert();
+            let eff = effective_sources(CertPurpose::TlsServer, &cert, &ALL_SOURCES);
+            assert_eq!(
+                eff,
+                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+            );
+        }
+
+        #[test]
+        fn generic_drops_cabf_br() {
+            let cert = good_cert();
+            let eff = effective_sources(CertPurpose::Generic, &cert, &ALL_SOURCES);
+            assert!(!eff.contains(&RuleSource::CabfBr));
+            assert_eq!(eff, vec![RuleSource::Rfc5280, RuleSource::Hygiene]);
+        }
+
+        #[test]
+        fn intersection_with_source_selection() {
+            let cert = good_cert();
+            // tls-server allows all, but the user asked only for rfc5280.
+            let eff = effective_sources(CertPurpose::TlsServer, &cert, &[RuleSource::Rfc5280]);
+            assert_eq!(eff, vec![RuleSource::Rfc5280]);
+        }
+
+        #[test]
+        fn empty_intersection_is_allowed() {
+            let cert = good_cert();
+            // generic omits cabf_br; selecting only cabf_br yields nothing.
+            let eff = effective_sources(CertPurpose::Generic, &cert, &[RuleSource::CabfBr]);
+            assert!(eff.is_empty());
+        }
+    }
+
+    mod exit_code {
+        use super::*;
+        use output::SeverityCounts;
+
+        fn counts(fatal: usize, error: usize, warn: usize, notice: usize) -> SeverityCounts {
+            SeverityCounts {
+                fatal,
+                error,
+                warn,
+                notice,
+            }
+        }
+
+        #[test]
+        fn fail_on_error_passes_on_warn_only() {
+            assert_eq!(
+                exit_code(counts(0, 0, 1, 3), Severity::Error),
+                ExitCode::SUCCESS
+            );
+        }
+
+        #[test]
+        fn fail_on_error_triggers_on_error() {
+            assert_eq!(
+                exit_code(counts(0, 1, 0, 0), Severity::Error),
+                ExitCode::from(EXIT_FINDINGS)
+            );
+        }
+
+        #[test]
+        fn fail_on_error_triggers_on_fatal() {
+            assert_eq!(
+                exit_code(counts(1, 0, 0, 0), Severity::Error),
+                ExitCode::from(EXIT_FINDINGS)
+            );
+        }
+
+        #[test]
+        fn fail_on_notice_triggers_on_any_finding() {
+            assert_eq!(
+                exit_code(counts(0, 0, 0, 1), Severity::Notice),
+                ExitCode::from(EXIT_FINDINGS)
+            );
+        }
+
+        #[test]
+        fn no_findings_is_success() {
+            assert_eq!(
+                exit_code(SeverityCounts::default(), Severity::Notice),
+                ExitCode::SUCCESS
+            );
+        }
+    }
+
+    mod purpose_header {
+        use super::*;
+
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).expect("good.pem fixture must exist");
+            let mut certs = Cert::load(&bytes).expect("good.pem must parse");
+            certs.remove(0)
+        }
+
+        #[test]
+        fn auto_resolves_and_marks_from_auto() {
+            let cert = good_cert();
+            let header = build_purpose_header(CliPurpose::Auto, CertPurpose::Auto, &cert);
+            // good.pem asserts serverAuth -> tls-server.
+            assert_eq!(header.resolved, "tls-server");
+            assert!(header.from_auto);
+        }
+
+        #[test]
+        fn explicit_purpose_not_from_auto() {
+            let cert = good_cert();
+            let header = build_purpose_header(CliPurpose::Generic, CertPurpose::Generic, &cert);
+            assert_eq!(header.resolved, "generic");
+            assert!(!header.from_auto);
         }
     }
 }

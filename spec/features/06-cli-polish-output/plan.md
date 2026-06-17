@@ -131,4 +131,8 @@ registry over `testdata/`. This is plan.md Milestone 6.
 
 ## Dependencies
 
-- None new. (`insta` for snapshot testing is introduced by the tester's golden-file test, not here.)
+No new production dependencies. One new dev-dependency, pinned to current latest stable on 2026-06-17
+(verified against crates.io):
+
+- `insta = "1"` (cli, `[dev-dependencies]`) — latest stable 1.48.0. Introduced by the tester's
+  golden-file test (task 04) for snapshot testing; not used by any production code.

@@ -2,7 +2,7 @@
 agent: developer
 seq: 2
 title: --fail-on exit codes + --chain flag + multi-cert loading
-status: pending
+status: done
 touches:
   - crates/cli/src/main.rs
 depends_on:

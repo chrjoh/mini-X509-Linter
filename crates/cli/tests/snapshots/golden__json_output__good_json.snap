@@ -1,0 +1,90 @@
+---
+source: crates/cli/tests/golden.rs
+expression: value
+---
+[
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "hygiene_not_expired",
+    "source": "hygiene"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "hygiene_no_sha1_signature",
+    "source": "hygiene"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "hygiene_rsa_key_min_2048",
+    "source": "hygiene"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "hygiene_ecdsa_curve_allowlist",
+    "source": "hygiene"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "rfc5280_version_is_v3",
+    "source": "rfc5280"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "rfc5280_serial_number_positive",
+    "source": "rfc5280"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "rfc5280_validity_not_after_after_not_before",
+    "source": "rfc5280"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "rfc5280_basic_constraints_critical_on_ca",
+    "source": "rfc5280"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "rfc5280_key_usage_present_when_ca",
+    "source": "rfc5280"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "rfc5280_san_present_if_subject_empty",
+    "source": "rfc5280"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_validity_max_398_days",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_cn_in_san",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_no_internal_names_or_reserved_ip",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_ext_key_usage_server_auth_present",
+    "source": "cabf_br"
+  }
+]

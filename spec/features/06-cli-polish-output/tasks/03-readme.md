@@ -2,7 +2,7 @@
 agent: developer
 seq: 3
 title: README — usage, flags, exit codes, examples
-status: pending
+status: done
 touches:
   - README.md
 depends_on:
