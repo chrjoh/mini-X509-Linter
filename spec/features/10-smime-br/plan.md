@@ -163,8 +163,9 @@ multipurpose-abuse signal. Document this interaction in task 02 and task 03.
 - `src/lints/cabf_smime/subject_country_valid.rs`
 - `src/registry.rs` — register the ~12 lints (after the `cabf_br` block, deterministic order); add
   `CertPurpose::Smime` + its `smime_sources()` helper + extend the `auto` resolver
-  (`auto_sources_from` / `resolve`); update the in-file unit tests (lint count 14 → 26; add a
-  `cabf_smime` source-filter test; add `Smime` purpose tests).
+  (`auto_sources_from` / `resolve`); update the in-file unit tests (lint count 32 → 44 off current
+  main after feature 12 — rfc5280=16, cabf_br=12, hygiene=4; reconcile if a sibling 09/11 lands
+  first; add a `cabf_smime` source-filter test; add `Smime` purpose tests).
 
 **crates/cli/ (production code — developer task 03)**
 

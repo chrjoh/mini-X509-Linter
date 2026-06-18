@@ -47,7 +47,7 @@ edits. See plan.md "Cross-Feature Coordination".
        ids, none `rfc5280_`/`hygiene_`/`cabf_br_`.
      - Update `tls_server_includes_cabf_br` (and the `auto_*` tls-server tests) to also expect
        `CabfEv` in the returned set; keep the assertion order matching the new `tls_server_sources()`.
-     - Leave the rfc5280 (6) and hygiene (4) and cabf_br (4) filter-count tests unchanged.
+     - Leave the rfc5280 (16) and hygiene (4) and cabf_br (12) filter-count tests unchanged (baseline after feature 12).
 2. `main.rs`:
    - Add `"cabf_ev" => Ok(RuleSource::CabfEv)` to `parse_source_token`; extend the error message's
      expected-list to include `cabf_ev`.

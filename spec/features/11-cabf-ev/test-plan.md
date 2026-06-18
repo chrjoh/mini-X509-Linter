@@ -94,12 +94,13 @@ Each lint's `#[cfg(test)] mod tests` covers, via its pure `evaluate(...)` helper
 ## Registry / Wiring Tests
 
 - `crates/linter/src/registry.rs` (developer task 03, in-file unit tests):
-  - `contains_the_known_lints`: count bumped by 9; the nine `cabf_ev_*` ids present.
+  - `contains_the_known_lints`: count bumped by 9 (32 → 41 off current main after feature 12;
+    reconcile if a sibling 09/10 landed first); the nine `cabf_ev_*` ids present.
   - `cabf_ev_source_filter_runs_exactly_the_cabf_ev_set`: 9 outcomes, all `RuleSource::CabfEv`, the
     nine ids, none `rfc5280_`/`hygiene_`/`cabf_br_`.
   - `tls_server_includes_cabf_br`-style tests updated to also expect `CabfEv`; `auto`-on-serverAuth
-    tests expect the new tls-server set. rfc5280 (6) / hygiene (4) / cabf_br (4) filter counts
-    unchanged.
+    tests expect the new tls-server set. rfc5280 (16) / hygiene (4) / cabf_br (12) filter counts
+    unchanged (baseline after feature 12).
 - `crates/cli/src/main.rs` (developer task 03, in-file unit tests):
   - `parse_source_token("cabf_ev")` → `RuleSource::CabfEv`; unknown-token error lists `cabf_ev`.
   - `select_sources` / `effective_sources` expectations updated for the new `ALL_SOURCES` /

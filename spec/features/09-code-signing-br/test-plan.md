@@ -57,7 +57,7 @@ direct lint invocation on a non-codeSigning leaf.
 - `auto` precedence (pure-helper tests, no fixture): codeSigning present → CodeSigning (even if
   serverAuth also present); serverAuth only → TlsServer; neither → Generic; EKU-read `Err` → Generic
   (fail closed).
-- Existing rfc5280 (6) / hygiene (4) / cabf_br (4) filter counts UNCHANGED.
+- Existing rfc5280 (16) / hygiene (4) / cabf_br (12) filter counts UNCHANGED (baseline after feature 12).
 
 ## Integration Tests (`crates/linter/tests/cabf_cs.rs`)
 

@@ -52,8 +52,9 @@ the affected unit tests.
    source-specific false positive). Add `auto_*` unit tests for the new emailProtection branch
    (Ok(true) → smime set; the serverAuth-wins precedence; Err → generic/fail-closed).
 4. Update in-file unit tests:
-   - `contains_the_known_lints`: registry length 14 → 26 (assuming 12 smime lints; adjust if the
-     reviewer ships 11), outcome count likewise, and add the twelve `cabf_smime_*` ids to the
+   - `contains_the_known_lints`: registry length 32 → 44 off current main (assuming 12 smime lints;
+     adjust if the reviewer ships 11, or if a sibling 09/11 landed first), outcome count likewise,
+     and add the twelve `cabf_smime_*` ids to the
      expected list. Note `sample_cert()` is a CA with no emailProtection, so the smime lints are
      `NotApplicable` but still produce one outcome each → outcome count == registry length.
    - Add `cabf_smime_source_filter_runs_exactly_the_cabf_smime_set` mirroring the rfc5280/hygiene/
@@ -61,7 +62,7 @@ the affected unit tests.
      prefixes).
    - Add `CertPurpose::Smime` tests: `smime_includes_cabf_smime` (allowed_sources ==
      `[Rfc5280, Hygiene, CabfSmime]`), and `resolve`/`allowed_sources` consistency. The existing
-     rfc5280 (6), hygiene (4), cabf_br (4) filter-count tests are UNCHANGED.
+     rfc5280 (16), hygiene (4), cabf_br (12) filter-count tests are UNCHANGED (baseline after feature 12).
 
 ### crates/cli/src/main.rs
 

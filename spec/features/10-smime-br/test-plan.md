@@ -63,16 +63,16 @@ a developer `check()`-level unit test on the defensive path.)
 
 ## Registry / Purpose Unit Tests (developer task 03, in `registry.rs`)
 
-- `contains_the_known_lints`: count 14 → 26 (12 smime lints); add the twelve `cabf_smime_*` ids.
-  `sample_cert()` is a CA without emailProtection ⇒ smime lints NotApplicable but still one outcome
-  each ⇒ outcome count == 26.
+- `contains_the_known_lints`: count 32 → 44 off current main (12 smime lints); add the twelve
+  `cabf_smime_*` ids. `sample_cert()` is a CA without emailProtection ⇒ smime lints NotApplicable
+  but still one outcome each ⇒ outcome count == 44.
 - `cabf_smime_source_filter_runs_exactly_the_cabf_smime_set`: 12 outcomes, all `CabfSmime`, the
   twelve ids, none from `rfc5280_`/`hygiene_`/`cabf_br_`.
 - `Smime` purpose: `allowed_sources == [Rfc5280, Hygiene, CabfSmime]`; `resolve`/`allowed_sources`
   consistency; `auto` on an emailProtection-only leaf resolves to `Smime`; serverAuth wins when both
   EKUs present; `Err` fails closed to generic. Use the `auto_*_from(...)` pure helpers so no extra
   fixture is required for the decision branches.
-- Existing rfc5280 (6) / hygiene (4) / cabf_br (4) filter counts UNCHANGED.
+- Existing rfc5280 (16) / hygiene (4) / cabf_br (12) filter counts UNCHANGED (baseline after feature 12).
 
 ## CLI Unit Tests (developer task 03)
 

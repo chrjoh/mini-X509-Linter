@@ -57,9 +57,10 @@ ordering stable for the feature-06 golden test.
   consistent (resolve returns the concrete purpose; allowed_sources returns that purpose's sources).
   Factor the decision into a pure, unit-testable helper (mirror `auto_sources_from`).
 - Update in-file unit tests:
-  - `contains_the_known_lints`: lint count and outcome count 14 → 22; add the 8 `cabf_cs_*` ids to the
+  - `contains_the_known_lints`: lint count and outcome count 32 → 40 (off current main after feature
+    12; reconcile if a sibling 10/11 lands first); add the 8 `cabf_cs_*` ids to the
     expected list. (NOTE: `sample_cert()` is a self-signed CA with no codeSigning EKU, so the 8 CS
-    lints are `NotApplicable` but still produce one OUTCOME each → outcome count is 22 too. Verify
+    lints are `NotApplicable` but still produce one OUTCOME each → outcome count is 40 too. Verify
     `sample_cert()` does not assert codeSigning.)
   - Add `cabf_cs_source_filter_runs_exactly_the_cabf_cs_set` mirroring the rfc5280/hygiene/cabf_br
     filter tests: `run_filtered(&cert, &[RuleSource::CabfCs])` → 8 outcomes, all `RuleSource::CabfCs`,
@@ -68,7 +69,7 @@ ordering stable for the feature-06 golden test.
     `[Rfc5280, Hygiene, CabfCs]`; document/test the auto precedence (codeSigning beats serverAuth).
     Use the `auto`-decision helper for the precedence unit tests so no fixture is required for the
     pure-logic cases; the fixture-backed end-to-end auto resolution is covered in task 04.
-  - Leave the existing rfc5280 (6) / hygiene (4) / cabf_br (4) filter-count tests unchanged.
+  - Leave the existing rfc5280 (16) / hygiene (4) / cabf_br (12) filter-count tests unchanged.
 
 ### 3. `crates/cli/src/main.rs`
 
@@ -98,7 +99,7 @@ ordering stable for the feature-06 golden test.
       Generic.
 - [ ] CLI accepts `--source cabf_cs` and `--purpose code-signing`; `purpose_label`/`source_label`
       render the new tokens; `ALL_SOURCES` and `SOURCE_ORDER` include `CabfCs` in matching order.
-- [ ] Registry unit tests updated (count 14 → 22, `cabf_cs` filter test, CodeSigning purpose +
+- [ ] Registry unit tests updated (count 32 → 40 off current main, `cabf_cs` filter test, CodeSigning purpose +
       auto-precedence tests); existing filter-count tests unchanged.
 - [ ] `cargo clippy --all-targets -- -D warnings` clean (also `--features serde`).
 

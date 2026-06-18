@@ -155,8 +155,9 @@ them (09 fully merged before 10 starts the shared-file edits, etc.). Within feat
 - `src/lints/cabf_cs/mod.rs` + the 8 lint files. (task 02)
 - `src/registry.rs` — register the 8 lints; add `CertPurpose::CodeSigning` +
   `code_signing_sources()`; extend `allowed_sources`/`resolve`/`auto` precedence; update in-file unit
-  tests (lint count 14 → 22; add a `cabf_cs` source-filter test; add a CodeSigning purpose test).
-  (task 03)
+  tests (lint count 32 → 40 off current main; add a `cabf_cs` source-filter test; add a CodeSigning
+  purpose test). Baseline is 32 after feature 12 (rfc5280=16, cabf_br=12, hygiene=4); if a sibling
+  (10/11) lands first, reconcile the running total. (task 03)
 
 **crates/cli/ (production code — developer task 03)**
 - `src/main.rs` — `--source cabf_cs` token + `ALL_SOURCES`; `CliPurpose::CodeSigning`
@@ -235,7 +236,7 @@ files in dependency order. No two tasks in this feature share a `touches` file w
 
 Feature 06's golden-file test (plan.md Milestone 6) snapshots the output of running all lints over
 `testdata/`. Adding 8 lints + a new `cabf_cs` source group + new `testdata/` fixtures changes:
-- the lint count (14 → 22) and the per-source grouping in any golden snapshot;
+- the lint count (32 → 40 off current main) and the per-source grouping in any golden snapshot;
 - `SOURCE_ORDER` now includes `cabf_cs`, so grouped text/JSON output gains a `[cabf_cs]` section.
 
 **Action (flag only — do NOT edit feature 06 here):** when feature 06's golden test exists/regenerates,
