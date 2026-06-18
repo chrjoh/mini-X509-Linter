@@ -19,9 +19,10 @@ use linter::{Applicability, Finding, LintOutcome, RuleSource, Severity};
 ///
 /// Listing the sources explicitly (rather than deriving order from the input)
 /// keeps text output stable regardless of registry ordering.
-const SOURCE_ORDER: [RuleSource; 5] = [
+const SOURCE_ORDER: [RuleSource; 6] = [
     RuleSource::Rfc5280,
     RuleSource::CabfBr,
+    RuleSource::CabfEv,
     RuleSource::CabfCs,
     RuleSource::CabfSmime,
     RuleSource::Hygiene,
@@ -155,6 +156,7 @@ fn source_label(source: RuleSource) -> &'static str {
     match source {
         RuleSource::Rfc5280 => "rfc5280",
         RuleSource::CabfBr => "cabf_br",
+        RuleSource::CabfEv => "cabf_ev",
         RuleSource::CabfCs => "cabf_cs",
         RuleSource::CabfSmime => "cabf_smime",
         RuleSource::Hygiene => "hygiene",

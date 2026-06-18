@@ -194,5 +194,59 @@ expression: value
     "findings": [],
     "lint_id": "cabf_br_subject_country_not_iso",
     "source": "cabf_br"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "cabf_ev_organization_name_missing",
+    "source": "cabf_ev"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "cabf_ev_business_category_missing",
+    "source": "cabf_ev"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "cabf_ev_business_category_invalid",
+    "source": "cabf_ev"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "cabf_ev_jurisdiction_country_missing",
+    "source": "cabf_ev"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "cabf_ev_serial_number_missing",
+    "source": "cabf_ev"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "cabf_ev_not_wildcard",
+    "source": "cabf_ev"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "cabf_ev_san_no_ip_address",
+    "source": "cabf_ev"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "cabf_ev_validity_max_398_days",
+    "source": "cabf_ev"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "cabf_ev_organization_id_present",
+    "source": "cabf_ev"
   }
 ]

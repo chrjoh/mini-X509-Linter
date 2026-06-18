@@ -2,7 +2,7 @@
 agent: developer
 seq: 2
 title: Implement the nine CA/B Forum EV lints, EV-policy-OID allowlist, and RuleSource::CabfEv
-status: pending
+status: done
 touches:
   - crates/linter/src/source.rs
   - crates/linter/src/lints/mod.rs

@@ -33,6 +33,16 @@ purpose: tls-server (auto)
   pass  cabf_br_subject_contains_reserved_ip
   pass  cabf_br_subject_country_not_iso
   pass  cabf_br_validity_max_398_days
+[cabf_ev]
+  n/a   cabf_ev_business_category_invalid
+  n/a   cabf_ev_business_category_missing
+  n/a   cabf_ev_jurisdiction_country_missing
+  n/a   cabf_ev_not_wildcard
+  n/a   cabf_ev_organization_id_present
+  n/a   cabf_ev_organization_name_missing
+  n/a   cabf_ev_san_no_ip_address
+  n/a   cabf_ev_serial_number_missing
+  n/a   cabf_ev_validity_max_398_days
 [hygiene]
   n/a   hygiene_ecdsa_curve_allowlist
   pass  hygiene_no_sha1_signature

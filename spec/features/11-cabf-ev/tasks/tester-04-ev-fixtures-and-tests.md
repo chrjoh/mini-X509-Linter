@@ -2,7 +2,7 @@
 agent: tester
 seq: 4
 title: EV fixtures (openssl-only) + EV integration tests + registry count bump
-status: pending
+status: done
 touches:
   - testdata/generate.sh
   - testdata/cabf_ev_good.pem
@@ -17,6 +17,12 @@ touches:
   - testdata/cabf_ev_org_id_missing.pem
   - crates/linter/tests/cabf_ev.rs
   - crates/linter/tests/registry.rs
+  - crates/cli/tests/golden.rs
+  - crates/cli/tests/snapshots/golden__text_output__good_text.snap
+  - crates/cli/tests/snapshots/golden__text_output__cabf_br_validity_400_days_text.snap
+  - crates/cli/tests/snapshots/golden__text_output__chain_bundle_text.snap
+  - crates/cli/tests/snapshots/golden__json_output__good_json.snap
+  - crates/cli/tests/snapshots/golden__verbose_output__good_verbose_text.snap
 depends_on:
   - developer-03-register-and-wire-cabf-ev
 ---
@@ -57,8 +63,10 @@ window. Each per-lint fixture is this clean EV leaf with EXACTLY ONE EV requirem
   stays positive so RFC `serial_number_positive` stays quiet).
 - `cabf_ev_wildcard_san.pem` — SAN dNSName `*.ev.example.com` (wildcard); CN matches a non-wildcard
   SAN entry so `cn_in_san` stays quiet.
-- `cabf_ev_san_ip.pem` — SAN includes a PUBLIC documentation IP `IP:192.0.2.10` (RFC 5737, so BR
-  `no_internal_names_or_reserved_ip` stays quiet) plus the CN as a dNSName.
+- `cabf_ev_san_ip.pem` — SAN includes a genuinely public, routable IP `IP:8.8.8.8` plus the CN as a
+  dNSName. (NOTE: the originally-suggested RFC 5737 `192.0.2.10` was found to trip the broad
+  `cabf_br_no_internal_names_or_reserved_ip` lint — the linter classifies RFC 5737 documentation
+  ranges as reserved — so a public IP is used to keep this a single-rule fixture.)
 - `cabf_ev_validity_400_days.pem` — 400-day window (`2026-06-01 → 2027-07-06`), else clean.
   **Documented exception:** a 400-day EV leaf fires BOTH `cabf_ev_validity_max_398_days` AND
   `cabf_br_validity_max_398_days` (both ceilings are 398d). The test for this fixture asserts both

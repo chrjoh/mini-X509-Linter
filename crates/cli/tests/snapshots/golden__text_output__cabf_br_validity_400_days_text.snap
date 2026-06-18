@@ -7,6 +7,8 @@ expression: out
 [cabf_br]
   error [cabf_br_validity_max_398_days] validity window is 400 days; CA/Browser Forum BR §6.3.2 allows at most 398 days for a subscriber certificate
   (11 passed, 0 not applicable)
+[cabf_ev]
+  (0 passed, 9 not applicable)
 [hygiene]
   (3 passed, 1 not applicable)
 summary: 1 error

@@ -134,9 +134,11 @@ pub enum CertPurpose {
     /// [`allowed_sources`](CertPurpose::allowed_sources) for the fail-closed
     /// behaviour on a parse error.
     Auto,
-    /// A publicly-trusted TLS server certificate: the standard, hygiene, and
-    /// TLS-server-specific [`RuleSource::CabfBr`] sets apply. Forcing this
-    /// purpose runs `CabfBr` even when the serverAuth EKU is absent.
+    /// A publicly-trusted TLS server certificate: the standard, hygiene,
+    /// TLS-server-specific [`RuleSource::CabfBr`], and Extended Validation
+    /// [`RuleSource::CabfEv`] sets apply. Forcing this purpose runs `CabfBr` and
+    /// `CabfEv` even when the serverAuth EKU is absent (the EV lints then self-gate
+    /// on EV scope, so they are `NotApplicable` on a non-EV leaf).
     TlsServer,
     /// A code-signing certificate: the standard, hygiene, and code-signing
     /// [`RuleSource::CabfCs`] sets apply. Forcing this purpose runs `CabfCs` even
@@ -154,13 +156,27 @@ pub enum CertPurpose {
     Generic,
 }
 
-/// The allowed-source set for a TLS-server certificate: every current source.
+/// The allowed-source set for a TLS-server certificate: the standard, hygiene,
+/// Baseline Requirements, and Extended Validation sources.
 ///
 /// Both [`CertPurpose::TlsServer`] and an `Auto` purpose that resolves to
 /// tls-server return this exact set, so the two paths stay in sync. Ordering is
-/// fixed (`Rfc5280, Hygiene, CabfBr`) for deterministic downstream output.
+/// fixed (`Rfc5280, Hygiene, CabfBr, CabfEv`) for deterministic downstream
+/// output.
+///
+/// [`RuleSource::CabfEv`] (the EV Guidelines) folds into this set rather than a
+/// dedicated purpose: EV is the stricter sub-profile of tls-server (EV ⊂ BR ⊂
+/// RFC 5280), and every EV lint self-gates on EV scope (a serverAuth leaf
+/// asserting a recognized EV policy OID), so a non-EV TLS leaf sees every EV
+/// lint as `NotApplicable`. This means `auto`/`tls-server` pull in the EV checks
+/// for free on EV certs with no CLI change.
 fn tls_server_sources() -> Vec<RuleSource> {
-    vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+    vec![
+        RuleSource::Rfc5280,
+        RuleSource::Hygiene,
+        RuleSource::CabfBr,
+        RuleSource::CabfEv,
+    ]
 }
 
 /// The allowed-source set for a non-TLS-server certificate: standard and
@@ -257,12 +273,12 @@ fn auto_sources_from(
 impl CertPurpose {
     /// The set of [`RuleSource`]s this purpose allows for `cert`.
     ///
-    /// The returned ordering is stable (always `Rfc5280, Hygiene, CabfBr` for the
-    /// tls-server set; `Rfc5280, Hygiene` for the generic set) so downstream
-    /// output stays deterministic. The CLI intersects this set with its
+    /// The returned ordering is stable (always `Rfc5280, Hygiene, CabfBr, CabfEv`
+    /// for the tls-server set; `Rfc5280, Hygiene` for the generic set) so
+    /// downstream output stays deterministic. The CLI intersects this set with its
     /// `--source` selection and passes the result to [`Registry::run_filtered`].
     ///
-    /// - [`TlsServer`](CertPurpose::TlsServer) → `[Rfc5280, Hygiene, CabfBr]`.
+    /// - [`TlsServer`](CertPurpose::TlsServer) → `[Rfc5280, Hygiene, CabfBr, CabfEv]`.
     /// - [`CodeSigning`](CertPurpose::CodeSigning) → `[Rfc5280, Hygiene, CabfCs]`.
     /// - [`Smime`](CertPurpose::Smime) → `[Rfc5280, Hygiene, CabfSmime]`.
     /// - [`Generic`](CertPurpose::Generic) → `[Rfc5280, Hygiene]`.
@@ -357,6 +373,7 @@ fn evaluate(lint: &dyn Lint, cert: &Cert) -> LintOutcome {
 pub fn default_registry() -> Registry {
     use crate::lints::cabf_br;
     use crate::lints::cabf_cs;
+    use crate::lints::cabf_ev;
     use crate::lints::cabf_smime;
     use crate::lints::hygiene;
     use crate::lints::rfc5280;
@@ -409,6 +426,21 @@ pub fn default_registry() -> Registry {
         Box::new(cabf_br::SubjectContainsReservedIp::new()),
         Box::new(cabf_br::ExtraSubjectCommonNames::new()),
         Box::new(cabf_br::SubjectCountryNotIso::new()),
+        // CA/Browser Forum EV (Extended Validation) Guidelines lints (feature 11).
+        // Appended after the cabf_br block and before the cabf_cs block, mirroring
+        // the SOURCE_ORDER position (EV directly after BR, since EV ⊂ BR). Order is
+        // deterministic and matters for the feature 06 golden test — keep it
+        // stable. All nine self-gate on EV scope (a serverAuth leaf asserting a
+        // recognized EV policy OID), so they are NotApplicable on every non-EV leaf.
+        Box::new(cabf_ev::OrganizationNameMissing::new()),
+        Box::new(cabf_ev::BusinessCategoryMissing::new()),
+        Box::new(cabf_ev::BusinessCategoryInvalid::new()),
+        Box::new(cabf_ev::JurisdictionCountryMissing::new()),
+        Box::new(cabf_ev::SerialNumberMissing::new()),
+        Box::new(cabf_ev::NotWildcard::new()),
+        Box::new(cabf_ev::SanNoIpAddress::new()),
+        Box::new(cabf_ev::ValidityMax398Days::new()),
+        Box::new(cabf_ev::OrganizationIdPresent::new()),
         // CA/Browser Forum Code-Signing Baseline Requirements lints (feature 09).
         // Appended after the cabf_br block; order matches the plan's lint table
         // and is deterministic — it matters for the feature 06 golden test, so
@@ -765,16 +797,17 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             let outcomes = registry.run(&cert);
 
             // Expect: the four hygiene lints, all sixteen RFC 5280 lints, the
-            // twelve CA/Browser Forum BR lints, the eight CA/Browser Forum
-            // Code-Signing lints, and the twelve CA/Browser Forum S/MIME lints are
-            // wired in and reported — one outcome per registered lint.
-            // `sample_cert()` is a self-signed CA with no codeSigning or
-            // emailProtection EKU, so the BR/CS/SMIME lints and leaf-only rfc5280
-            // lints are `NotApplicable` but still produce one outcome each, keeping
-            // the outcome count equal to the registry length.
+            // twelve CA/Browser Forum BR lints, the nine CA/Browser Forum EV lints,
+            // the eight CA/Browser Forum Code-Signing lints, and the twelve
+            // CA/Browser Forum S/MIME lints are wired in and reported — one outcome
+            // per registered lint. `sample_cert()` is a self-signed CA with no
+            // codeSigning or emailProtection EKU and no EV policy OID, so the
+            // BR/EV/CS/SMIME lints and leaf-only rfc5280 lints are `NotApplicable`
+            // but still produce one outcome each, keeping the outcome count equal to
+            // the registry length.
             assert!(!registry.is_empty());
-            assert_eq!(registry.len(), 52);
-            assert_eq!(outcomes.len(), 52);
+            assert_eq!(registry.len(), 61);
+            assert_eq!(outcomes.len(), 61);
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
             for expected in [
@@ -810,6 +843,15 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "cabf_br_subject_contains_reserved_ip",
                 "cabf_br_extra_subject_common_names",
                 "cabf_br_subject_country_not_iso",
+                "cabf_ev_organization_name_missing",
+                "cabf_ev_business_category_missing",
+                "cabf_ev_business_category_invalid",
+                "cabf_ev_jurisdiction_country_missing",
+                "cabf_ev_serial_number_missing",
+                "cabf_ev_not_wildcard",
+                "cabf_ev_san_no_ip_address",
+                "cabf_ev_validity_max_398_days",
+                "cabf_ev_organization_id_present",
                 "cabf_cs_eku_required",
                 "cabf_cs_key_usage_required",
                 "cabf_cs_rsa_key_size",
@@ -947,6 +989,45 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
         }
 
         #[test]
+        fn cabf_ev_source_filter_runs_exactly_the_cabf_ev_set() {
+            // Setup & Invoke: filtering by RuleSource::CabfEv must select the nine
+            // EV lints and nothing else (no RFC 5280, hygiene, cabf_br, cabf_cs, or
+            // cabf_smime lints). Filtering is by source, before applicability, so the
+            // EV lints appear even though `sample_cert()` is not in EV scope (no EV
+            // policy OID) — they are NotApplicable but still emitted as outcomes.
+            let registry = default_registry();
+            let cert = sample_cert();
+            let outcomes = registry.run_filtered(&cert, &[RuleSource::CabfEv]);
+
+            // Expect
+            assert_eq!(outcomes.len(), 9);
+            assert!(outcomes.iter().all(|o| o.source == RuleSource::CabfEv));
+
+            let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
+            for expected in [
+                "cabf_ev_organization_name_missing",
+                "cabf_ev_business_category_missing",
+                "cabf_ev_business_category_invalid",
+                "cabf_ev_jurisdiction_country_missing",
+                "cabf_ev_serial_number_missing",
+                "cabf_ev_not_wildcard",
+                "cabf_ev_san_no_ip_address",
+                "cabf_ev_validity_max_398_days",
+                "cabf_ev_organization_id_present",
+            ] {
+                assert!(
+                    ids.contains(&expected),
+                    "cabf_ev filter missing lint {expected}; got {ids:?}"
+                );
+            }
+            assert!(!ids.iter().any(|id| id.starts_with("rfc5280_")));
+            assert!(!ids.iter().any(|id| id.starts_with("hygiene_")));
+            assert!(!ids.iter().any(|id| id.starts_with("cabf_br_")));
+            assert!(!ids.iter().any(|id| id.starts_with("cabf_cs_")));
+            assert!(!ids.iter().any(|id| id.starts_with("cabf_smime_")));
+        }
+
+        #[test]
         fn cabf_cs_source_filter_runs_exactly_the_cabf_cs_set() {
             // Setup & Invoke: filtering by RuleSource::CabfCs must select the
             // eight Code-Signing lints and nothing else (no RFC 5280, hygiene, or
@@ -1051,12 +1132,18 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             // Invoke
             let sources = CertPurpose::TlsServer.allowed_sources(&cert);
 
-            // Expect: all three current sources, stable order, CabfBr present.
+            // Expect: the tls-server set, stable order, CabfBr and CabfEv present.
             assert_eq!(
                 sources,
-                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+                vec![
+                    RuleSource::Rfc5280,
+                    RuleSource::Hygiene,
+                    RuleSource::CabfBr,
+                    RuleSource::CabfEv
+                ]
             );
             assert!(sources.contains(&RuleSource::CabfBr));
+            assert!(sources.contains(&RuleSource::CabfEv));
         }
 
         #[test]
@@ -1084,10 +1171,15 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             // Invoke
             let sources = CertPurpose::Auto.allowed_sources(&cert);
 
-            // Expect: resolves to the tls-server set incl. CabfBr.
+            // Expect: resolves to the tls-server set incl. CabfBr and CabfEv.
             assert_eq!(
                 sources,
-                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+                vec![
+                    RuleSource::Rfc5280,
+                    RuleSource::Hygiene,
+                    RuleSource::CabfBr,
+                    RuleSource::CabfEv
+                ]
             );
             assert_eq!(CertPurpose::Auto.resolve(&cert), CertPurpose::TlsServer);
         }
@@ -1188,7 +1280,12 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             );
             assert_eq!(
                 auto_sources_from(Ok(false), Ok(true), Ok(false)),
-                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+                vec![
+                    RuleSource::Rfc5280,
+                    RuleSource::Hygiene,
+                    RuleSource::CabfBr,
+                    RuleSource::CabfEv
+                ]
             );
         }
 
@@ -1261,7 +1358,12 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             );
             assert_eq!(
                 auto_sources_from(Ok(false), Ok(true), Ok(true)),
-                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+                vec![
+                    RuleSource::Rfc5280,
+                    RuleSource::Hygiene,
+                    RuleSource::CabfBr,
+                    RuleSource::CabfEv
+                ]
             );
         }
 

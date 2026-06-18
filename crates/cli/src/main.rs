@@ -10,7 +10,7 @@
 //!
 //! - `--format <text|json>` — output format (default `text`).
 //! - `--source <list>` — comma-separated subset of
-//!   `rfc5280,cabf_br,cabf_cs,cabf_smime,hygiene` (default: all sources).
+//!   `rfc5280,cabf_br,cabf_ev,cabf_cs,cabf_smime,hygiene` (default: all sources).
 //! - `--min-severity <notice|warn|error|fatal>` — hide findings below the given
 //!   level (default `notice`).
 //! - `--fail-on <notice|warn|error|fatal>` — exit non-zero if any surfaced
@@ -142,8 +142,8 @@ struct Args {
     #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
 
-    /// Comma-separated lint sources to run: `rfc5280`, `cabf_br`, `cabf_cs`,
-    /// `cabf_smime`, `hygiene`.
+    /// Comma-separated lint sources to run: `rfc5280`, `cabf_br`, `cabf_ev`,
+    /// `cabf_cs`, `cabf_smime`, `hygiene`.
     ///
     /// Defaults to all sources when omitted.
     #[arg(long)]
@@ -173,9 +173,10 @@ struct Args {
 
 /// The full set of sources, used when `--source` is omitted. Order matches the
 /// text formatter's `SOURCE_ORDER` for deterministic output.
-const ALL_SOURCES: [RuleSource; 5] = [
+const ALL_SOURCES: [RuleSource; 6] = [
     RuleSource::Rfc5280,
     RuleSource::CabfBr,
+    RuleSource::CabfEv,
     RuleSource::CabfCs,
     RuleSource::CabfSmime,
     RuleSource::Hygiene,
@@ -189,11 +190,12 @@ fn parse_source_token(token: &str) -> Result<RuleSource> {
     match token.trim() {
         "rfc5280" => Ok(RuleSource::Rfc5280),
         "cabf_br" => Ok(RuleSource::CabfBr),
+        "cabf_ev" => Ok(RuleSource::CabfEv),
         "cabf_cs" => Ok(RuleSource::CabfCs),
         "cabf_smime" => Ok(RuleSource::CabfSmime),
         "hygiene" => Ok(RuleSource::Hygiene),
         other => bail!(
-            "unknown --source value '{other}' (expected rfc5280, cabf_br, cabf_cs, cabf_smime, or hygiene)"
+            "unknown --source value '{other}' (expected rfc5280, cabf_br, cabf_ev, cabf_cs, cabf_smime, or hygiene)"
         ),
     }
 }
@@ -551,7 +553,12 @@ mod tests {
             let eff = effective_sources(CertPurpose::TlsServer, &cert, &ALL_SOURCES);
             assert_eq!(
                 eff,
-                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+                vec![
+                    RuleSource::Rfc5280,
+                    RuleSource::Hygiene,
+                    RuleSource::CabfBr,
+                    RuleSource::CabfEv
+                ]
             );
         }
 

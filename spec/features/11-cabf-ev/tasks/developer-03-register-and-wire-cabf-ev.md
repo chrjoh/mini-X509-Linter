@@ -2,7 +2,7 @@
 agent: developer
 seq: 3
 title: Register EV lints, fold CabfEv into tls-server sources, wire CLI/output
-status: pending
+status: done
 touches:
   - crates/linter/src/registry.rs
   - crates/cli/src/main.rs

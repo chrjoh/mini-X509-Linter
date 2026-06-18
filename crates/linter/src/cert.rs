@@ -1118,6 +1118,191 @@ impl Cert {
         self.with_parsed(|c| c.subject().iter_organizational_unit().count())
     }
 
+    /// All values of the subject-DN attribute identified by `oid_arc`, in
+    /// encounter order, as owned strings.
+    ///
+    /// This is the shared, DRY backbone for the subject-attribute accessors:
+    /// `subject_common_names` reads OID `2.5.4.3` the same way, and the EV
+    /// identity accessors below
+    /// ([`subject_organization_names`](Cert::subject_organization_names),
+    /// [`subject_business_category`](Cert::subject_business_category),
+    /// [`subject_jurisdiction_country`](Cert::subject_jurisdiction_country),
+    /// [`subject_serial_numbers`](Cert::subject_serial_numbers),
+    /// [`subject_organization_identifiers`](Cert::subject_organization_identifiers))
+    /// each delegate here with their own attribute OID. Attribute values that
+    /// are not valid UTF-8 are skipped rather than surfaced as an error.
+    ///
+    /// `oid_arc` is the BER OID component arc (e.g. `&[2, 5, 4, 10]` for
+    /// `organizationName`). An un-encodable arc yields [`CertError::Der`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if `oid_arc` cannot be encoded as an OID, or if
+    /// the owned DER unexpectedly fails to re-parse (it was validated at
+    /// construction time).
+    fn subject_attribute_values(&self, oid_arc: &[u64]) -> Result<Vec<String>, CertError> {
+        let oid = Oid::from(oid_arc).map_err(|_| CertError::Der)?;
+        self.with_parsed(|c| {
+            c.subject()
+                .iter_by_oid(&oid)
+                .filter_map(|atv| atv.as_str().ok().map(str::to_owned))
+                .collect()
+        })
+    }
+
+    /// The certificate-policy OIDs from the `certificatePolicies` extension
+    /// (OID `2.5.29.32`, RFC 5280 §4.2.1.4), in dotted-decimal form and encounter
+    /// order.
+    ///
+    /// Consumed by the EV-scope gate `is_ev_scope()` (feature 11): a TLS leaf is
+    /// "in EV scope" when one of its policy OIDs is on the curated EV allowlist.
+    /// Returns an empty `Vec` when the extension is absent or carries no policy
+    /// information; a malformed or duplicated extension is likewise treated as an
+    /// empty list rather than surfaced as an error, so the EV gate fails closed
+    /// (a parse failure never manufactures an EV finding).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn certificate_policy_oids(&self) -> Result<Vec<String>, CertError> {
+        // OID 2.5.29.32 = id-ce-certificatePolicies (RFC 5280 §4.2.1.4).
+        let oid = Oid::from(&[2, 5, 29, 32]).map_err(|_| CertError::Der)?;
+        self.with_parsed(|c| {
+            let mut oids = Vec::new();
+            // A duplicated certificatePolicies extension is treated as absent.
+            if let Ok(Some(ext)) = c.get_extension_unique(&oid)
+                && let ParsedExtension::CertificatePolicies(policies) = ext.parsed_extension()
+            {
+                for info in policies {
+                    oids.push(info.policy_id.to_string());
+                }
+            }
+            oids
+        })
+    }
+
+    /// The subject `organizationName` (O, OID `2.5.4.10`) attribute values, in
+    /// encounter order, as owned strings.
+    ///
+    /// Consumed by the EV `cabf_ev_organization_name_missing` lint (EVG §9.2.1,
+    /// which requires an EV subject to carry `organizationName`). Returns an empty
+    /// `Vec` when the subject has no `organizationName` attribute; non-UTF-8
+    /// values are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_organization_names(&self) -> Result<Vec<String>, CertError> {
+        // OID 2.5.4.10 = id-at-organizationName.
+        self.subject_attribute_values(&[2, 5, 4, 10])
+    }
+
+    /// The subject `businessCategory` (OID `2.5.4.15`) attribute values, in
+    /// encounter order, as owned strings.
+    ///
+    /// Consumed by the EV `cabf_ev_business_category_missing` and
+    /// `cabf_ev_business_category_invalid` lints (EVG §9.2.4, which requires an EV
+    /// subject to carry `businessCategory` set to one of the permitted values).
+    /// Returns an empty `Vec` when the subject has no `businessCategory`
+    /// attribute; non-UTF-8 values are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_business_category(&self) -> Result<Vec<String>, CertError> {
+        // OID 2.5.4.15 = id-at-businessCategory.
+        self.subject_attribute_values(&[2, 5, 4, 15])
+    }
+
+    /// The subject `jurisdictionOfIncorporationCountryName`
+    /// (OID `1.3.6.1.4.1.311.60.2.1.3`) attribute values, in encounter order, as
+    /// owned strings.
+    ///
+    /// Consumed by the EV `cabf_ev_jurisdiction_country_missing` lint (EVG §9.2.4,
+    /// which requires an EV subject to carry the jurisdiction-of-incorporation
+    /// country). This is the Microsoft-arc jurisdiction OID, distinct from the
+    /// plain subject `countryName` (OID `2.5.4.6`, see
+    /// [`subject_country_values`](Cert::subject_country_values)). Returns an empty
+    /// `Vec` when the attribute is absent; non-UTF-8 values are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_jurisdiction_country(&self) -> Result<Vec<String>, CertError> {
+        // OID 1.3.6.1.4.1.311.60.2.1.3 = jurisdictionOfIncorporationCountryName.
+        self.subject_attribute_values(&[1, 3, 6, 1, 4, 1, 311, 60, 2, 1, 3])
+    }
+
+    /// The subject-DN `serialNumber` (OID `2.5.4.5`) attribute values, in
+    /// encounter order, as owned strings.
+    ///
+    /// **This is the subject DN `serialNumber` attribute — the EV
+    /// registration/incorporation number of the legal entity — NOT the
+    /// certificate serial number.** The certificate serial (the
+    /// `TBSCertificate.serialNumber` INTEGER) is a wholly separate field surfaced
+    /// by [`serial_summary`](Cert::serial_summary) /
+    /// [`serial_der_octets`](Cert::serial_der_octets); the two share a name but
+    /// nothing else.
+    ///
+    /// Consumed by the EV `cabf_ev_serial_number_missing` lint (EVG §9.2.6, which
+    /// requires an EV subject to carry the registration number in this attribute).
+    /// Returns an empty `Vec` when the subject has no `serialNumber` attribute;
+    /// non-UTF-8 values are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_serial_numbers(&self) -> Result<Vec<String>, CertError> {
+        // OID 2.5.4.5 = id-at-serialNumber (the subject DN attribute, NOT the
+        // certificate serial number — see serial_summary / serial_der_octets).
+        self.subject_attribute_values(&[2, 5, 4, 5])
+    }
+
+    /// The subject `organizationIdentifier` (OID `2.5.4.97`) attribute values, in
+    /// encounter order, as owned strings.
+    ///
+    /// Consumed by the EV `cabf_ev_organization_id_present` lint (EVG §9.2.8,
+    /// which requires an EV subject to carry an `organizationIdentifier`); the
+    /// lint flags the *absence* of any value here. Returns an empty `Vec` when the
+    /// subject has no `organizationIdentifier` attribute; non-UTF-8 values are
+    /// skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_organization_identifiers(&self) -> Result<Vec<String>, CertError> {
+        // OID 2.5.4.97 = id-at-organizationIdentifier.
+        self.subject_attribute_values(&[2, 5, 4, 97])
+    }
+
+    /// The Subject Alternative Name `dNSName` entries that are wildcard names
+    /// (begin with the literal `*.` label), in encounter order, as owned strings.
+    ///
+    /// Consumed by the EV `cabf_ev_not_wildcard` lint (EVG §9.2.2 / the BR
+    /// wildcard prohibition for EV, which forbids any wildcard SAN name on an EV
+    /// cert); the lint emits one finding per offending entry. This reuses the same
+    /// SAN `dNSName` parsing path as [`san_dns_names`](Cert::san_dns_names),
+    /// filtered to the wildcard entries. Returns an empty `Vec` when the SAN is
+    /// absent or carries no wildcard `dNSName` entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn san_wildcard_dns_names(&self) -> Result<Vec<String>, CertError> {
+        Ok(self
+            .san_dns_names()?
+            .into_iter()
+            .filter(|name| name.starts_with("*."))
+            .collect())
+    }
+
     /// The DER time encodings of the `notBefore` and `notAfter` validity fields,
     /// as `(not_before, not_after)`.
     ///
@@ -1844,6 +2029,87 @@ mod tests {
             assert_eq!(
                 cert.subject_country_names().unwrap(),
                 cert.subject_country_values().unwrap()
+            );
+        }
+    }
+
+    mod feature11_ev_accessors {
+        use super::*;
+
+        /// Loads the workspace `testdata/good.pem` fixture: a non-EV BR-compliant
+        /// TLS leaf — no `certificatePolicies` extension, no EV subject identity
+        /// attributes (organizationName / businessCategory / jurisdiction country
+        /// / subject serialNumber / organizationIdentifier), and a single
+        /// non-wildcard SAN `dNSName`. The negative/empty case for every EV
+        /// accessor; positive coverage comes from the EV fixtures (task 04).
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        #[test]
+        fn good_cert_has_no_certificate_policy_oids() {
+            let cert = good_cert();
+
+            // good.pem is a non-EV leaf: no certificatePolicies extension, so it
+            // is not in EV scope.
+            assert!(cert.certificate_policy_oids().unwrap().is_empty());
+        }
+
+        #[test]
+        fn good_cert_has_no_organization_name() {
+            let cert = good_cert();
+
+            assert!(cert.subject_organization_names().unwrap().is_empty());
+        }
+
+        #[test]
+        fn good_cert_has_no_business_category() {
+            let cert = good_cert();
+
+            assert!(cert.subject_business_category().unwrap().is_empty());
+        }
+
+        #[test]
+        fn good_cert_has_no_jurisdiction_country() {
+            let cert = good_cert();
+
+            assert!(cert.subject_jurisdiction_country().unwrap().is_empty());
+        }
+
+        #[test]
+        fn good_cert_has_no_subject_serial_number_attribute() {
+            let cert = good_cert();
+
+            // The subject-DN serialNumber attribute is absent...
+            assert!(cert.subject_serial_numbers().unwrap().is_empty());
+
+            // ...while the certificate serial number (a distinct field) is still
+            // present and positive — proving the two are not conflated.
+            let summary = cert.serial_summary().unwrap();
+            assert!(!summary.is_zero);
+            assert!(!summary.is_negative);
+        }
+
+        #[test]
+        fn good_cert_has_no_organization_identifier() {
+            let cert = good_cert();
+
+            assert!(cert.subject_organization_identifiers().unwrap().is_empty());
+        }
+
+        #[test]
+        fn good_cert_has_no_wildcard_san_names() {
+            let cert = good_cert();
+
+            // good.pem's single SAN dNSName (good.example.com) is not a wildcard.
+            assert!(cert.san_wildcard_dns_names().unwrap().is_empty());
+            assert_eq!(
+                cert.san_dns_names().unwrap(),
+                vec!["good.example.com".to_string()],
+                "the underlying SAN dNSName is the non-wildcard CN"
             );
         }
     }
