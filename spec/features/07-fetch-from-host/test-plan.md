@@ -36,6 +36,19 @@ deliberate bypass, scoped to capture; verification is a separate real pass and f
   from findings, in text and JSON.
 - Built without the `fetch` feature → `--from-host` errors clearly; file linting unaffected.
 
+### `--save` (reuse the local server; feature on)
+- `--from-host ... --save <path>` writes a valid PEM bundle containing the **full presented
+  chain** (leaf + intermediates, presentation order); linting still proceeds and renders.
+- **Round-trip:** re-linting the saved file via the normal `<PATH>` input yields the **same
+  leaf findings** as the live fetch (the saved bundle is re-lintable).
+- `--save` (and `--force`) **without** `--from-host` (with `<PATH>` or no input) → clear error.
+- **Overwrite policy:** `--save` to an existing file **without** `--force` → refuses with a
+  clear error and leaves the file unchanged; **with** `--force` → overwrites successfully.
+- **Write failure:** save to a path whose parent directory does not exist → clear **generic**
+  error, **non-zero exit**, no panic/stack trace.
+- Save happens **regardless of verdict**: an expired/self-signed/untrusted served chain is
+  still written to disk.
+
 ## Edge Cases
 
 - Self-signed / expired / untrusted server cert → chain captured, verdict explains failure.

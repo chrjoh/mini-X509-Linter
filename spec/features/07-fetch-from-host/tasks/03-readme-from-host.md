@@ -2,7 +2,7 @@
 agent: developer
 seq: 3
 title: README — document --from-host, SNI, fetch feature, verdict
-status: pending
+status: done
 touches:
   - README.md
 depends_on:
@@ -33,13 +33,21 @@ Add a "Fetching from a host" section covering:
 7. A brief security note: the handshake uses an accept-any verifier solely to capture the
    presented chain (so untrusted/expired certs can still be inspected); the verdict is a
    separate, real verification pass.
-8. Example invocation(s) with sample output.
+8. `--save <path>` / `--force`: write the **full presented chain** (leaf + intermediates) to
+   disk as a **PEM bundle**. Only valid with `--from-host` (error otherwise). Refuses to
+   overwrite an existing file unless `--force`; parent directory must already exist. The saved
+   bundle is **re-lintable** via the normal `<PATH>` input. Save happens regardless of the
+   verification verdict; saving and linting are independent.
+9. Example invocation(s) with sample output, including a `--from-host ... --save out.pem`
+   example.
 
 ## Acceptance Criteria
 
-- [ ] README documents all three flags, the feature flag, SNI rules, mutual exclusion, and
-      the verdict-vs-findings distinction.
-- [ ] Includes at least one `--from-host` example.
+- [ ] README documents all flags (`--from-host`, `--sni`, `--timeout`, `--save`, `--force`),
+      the feature flag, SNI rules, mutual exclusion, and the verdict-vs-findings distinction.
+- [ ] Documents `--save`/`--force`: PEM bundle of the full presented chain, only with
+      `--from-host`, refuse-overwrite-without-`--force`, re-lintable via `<PATH>`.
+- [ ] Includes at least one `--from-host` example and one `--save` example.
 - [ ] Consistent with the implemented CLI behaviour.
 
 ## Notes / Dependencies

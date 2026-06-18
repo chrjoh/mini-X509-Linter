@@ -36,6 +36,8 @@
 //! does. A load/parse/usage error exits non-zero via the process error path.
 
 mod output;
+#[cfg(feature = "fetch")]
+mod save;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -137,7 +139,50 @@ impl From<CliPurpose> for CertPurpose {
 )]
 struct Args {
     /// Path to a certificate file (PEM or DER; format is auto-detected).
-    path: PathBuf,
+    ///
+    /// Mutually exclusive with `--from-host`. Exactly one input source must be
+    /// given.
+    path: Option<PathBuf>,
+
+    /// Fetch the certificate from a live host over TLS instead of reading a
+    /// file (`host[:port]`, default port 443). Only the leaf is linted; the
+    /// presented intermediates and the chain verification verdict are shown.
+    ///
+    /// Mutually exclusive with the positional `<PATH>`.
+    #[cfg(feature = "fetch")]
+    #[arg(long, value_name = "HOST")]
+    from_host: Option<String>,
+
+    /// Override/supply the SNI sent in the TLS handshake. Required when
+    /// `--from-host` is an IP address (SNI cannot be derived from an IP); for a
+    /// hostname it overrides the SNI derived from the host.
+    #[cfg(feature = "fetch")]
+    #[arg(long, value_name = "NAME")]
+    sni: Option<String>,
+
+    /// Connection + handshake timeout in seconds for `--from-host`.
+    #[cfg(feature = "fetch")]
+    #[arg(long, default_value_t = 10, value_name = "SECS")]
+    timeout: u64,
+
+    /// Refuse to connect to private / loopback / link-local addresses with
+    /// `--from-host` (SSRF guard). Off by default: this is a local user-run CLI
+    /// intended for validating your own/internal/localhost hosts.
+    #[cfg(feature = "fetch")]
+    #[arg(long)]
+    block_private: bool,
+
+    /// Also write the full presented chain (leaf + intermediates, in
+    /// presentation order) to `<path>` as a PEM bundle. Only valid with
+    /// `--from-host`. Refuses to overwrite an existing file unless `--force`.
+    #[cfg(feature = "fetch")]
+    #[arg(long, value_name = "PATH")]
+    save: Option<PathBuf>,
+
+    /// Allow `--save` to overwrite an existing file.
+    #[cfg(feature = "fetch")]
+    #[arg(long)]
+    force: bool,
 
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Text)]
@@ -307,7 +352,26 @@ fn run(args: &Args) -> Result<ExitCode> {
         Verbosity::Summary
     };
 
-    let certs = load_certs(&args.path)?;
+    // The `--from-host` path is its own pipeline: fetch → save → lint leaf →
+    // render chain + verdict + findings. It is gated entirely behind the
+    // `fetch` feature; the file path below is unchanged.
+    #[cfg(feature = "fetch")]
+    if args.from_host.is_some() {
+        return run_from_host(args, &selected, purpose, min, fail_on, verbosity);
+    }
+
+    // `--from-host`-only flags must not be used without `--from-host`.
+    #[cfg(feature = "fetch")]
+    {
+        if args.save.is_some() {
+            bail!("--save is only valid with --from-host");
+        }
+        if args.force {
+            bail!("--force is only valid with --save (which requires --from-host)");
+        }
+    }
+
+    let certs = load_input_certs(args)?;
     let registry = default_registry();
 
     // The purpose header is resolved against the leaf (the cert that anchors the
@@ -446,6 +510,188 @@ fn exit_code(counts: output::SeverityCounts, fail_on: Severity) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// The `--from-host` pipeline: validate the target, fetch the chain, optionally
+/// save it, lint the leaf, and render the chain + verdict + findings.
+///
+/// Only the leaf is linted; the presented intermediates are display context.
+///
+/// # Errors
+///
+/// Returns an error if the input flags conflict, the target/SNI rules are not
+/// met, the fetch (connect/handshake/timeout) fails, the optional `--save`
+/// write fails, the leaf DER cannot be parsed, or the report cannot be
+/// serialized.
+#[cfg(feature = "fetch")]
+fn run_from_host(
+    args: &Args,
+    selected: &[RuleSource],
+    purpose: CertPurpose,
+    min: Severity,
+    fail_on: Severity,
+    verbosity: Verbosity,
+) -> Result<ExitCode> {
+    use std::time::Duration;
+
+    // `--from-host` and the positional `<PATH>` are mutually exclusive sources.
+    if args.path.is_some() {
+        bail!("--from-host and a positional <PATH> are mutually exclusive (choose one input)");
+    }
+    // `--force` is only meaningful alongside `--save`.
+    if args.force && args.save.is_none() {
+        bail!("--force is only valid with --save");
+    }
+
+    let Some(host) = args.from_host.as_deref() else {
+        // Unreachable: callers gate on `from_host.is_some()`.
+        bail!("--from-host requires a host value");
+    };
+
+    let target = fetch::Target::parse(host)
+        .map_err(|e| anyhow::anyhow!("invalid --from-host target: {e}"))?;
+
+    // SNI rules: hostname derives SNI by default; an IP requires an explicit
+    // --sni. We surface a clear message up front (fetch_chain enforces it too).
+    if let fetch::HostKind::Ip(_) = target.host()
+        && args.sni.is_none()
+    {
+        bail!("--sni is required when --from-host is an IP address (SNI cannot be derived)");
+    }
+
+    // SSRF default: this is a local user-run CLI for validating your own /
+    // internal / localhost hosts, so private addresses are ALLOWED by default.
+    // `--block-private` opts into the SSRF guard.
+    let block_private = args.block_private;
+
+    let chain = fetch::fetch_chain(
+        &target,
+        args.sni.as_deref(),
+        Duration::from_secs(args.timeout),
+        block_private,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to fetch certificate from host: {e}"))?;
+
+    // Save sits between capture and lint and does not gate linting. It runs
+    // regardless of the verification verdict.
+    if let Some(save_path) = args.save.as_deref() {
+        save::save_chain(
+            save_path,
+            &chain.leaf_der,
+            &chain.intermediates_der,
+            args.force,
+        )?;
+        // Confirmation on stderr so it never pollutes stdout golden output.
+        eprintln!("saved presented chain to {}", save_path.display());
+    }
+
+    // Only the leaf is linted.
+    let leaf = Cert::from_der(&chain.leaf_der)
+        .context("failed to parse the leaf certificate presented by the host")?;
+    let registry = default_registry();
+
+    let header = build_purpose_header(args.purpose, purpose, &leaf);
+    let effective = effective_sources(purpose, &leaf, selected);
+    let outcomes = registry.run_filtered(&leaf, &effective);
+
+    // Build the presented-chain display entries (leaf + intermediates).
+    let entries = build_chain_entries(&leaf, &chain.intermediates_der);
+
+    match args.format {
+        Format::Text => {
+            let mut report = output::render_chain_section_text(&entries, &chain.verdict);
+            report.push_str(&output::render_text_opts(
+                &outcomes,
+                min,
+                verbosity,
+                Some(&header),
+            ));
+            print!("{report}");
+        }
+        Format::Json => {
+            let outcomes_json = output::render_json(&outcomes, min)?;
+            let outcomes_value: serde_json::Value = serde_json::from_str(&outcomes_json)
+                .context("failed to re-parse leaf outcomes JSON")?;
+            let section = output::chain_section_json(&entries, &chain.verdict);
+            let document = serde_json::json!({
+                "presented_chain": section["presented_chain"],
+                "verification": section["verification"],
+                "outcomes": outcomes_value,
+            });
+            let json = serde_json::to_string_pretty(&document)
+                .context("failed to serialize --from-host report to JSON")?;
+            println!("{json}");
+        }
+    }
+
+    let counts = output::severity_counts(&outcomes, min);
+    Ok(exit_code(counts, fail_on))
+}
+
+/// Builds the presented-chain display entries: the leaf plus each intermediate,
+/// each with a best-effort subject line.
+///
+/// Intermediate DER that fails to parse is still listed (with a placeholder
+/// subject) so the displayed chain mirrors what the server actually presented.
+#[cfg(feature = "fetch")]
+fn build_chain_entries(leaf: &Cert, intermediates_der: &[Vec<u8>]) -> Vec<output::ChainEntry> {
+    let mut entries = Vec::with_capacity(1 + intermediates_der.len());
+    entries.push(output::ChainEntry {
+        label: "Certificate 1 (leaf)".to_string(),
+        subject: subject_description(leaf),
+    });
+    for (idx, der) in intermediates_der.iter().enumerate() {
+        let subject = match Cert::from_der(der) {
+            Ok(cert) => subject_description(&cert),
+            Err(_) => "(unparseable certificate)".to_string(),
+        };
+        entries.push(output::ChainEntry {
+            label: format!("Certificate {}", idx + 2),
+            subject,
+        });
+    }
+    entries
+}
+
+/// A best-effort, deterministic subject description for chain display.
+///
+/// Uses the subject common name(s) when present, falling back to a placeholder.
+#[cfg(feature = "fetch")]
+fn subject_description(cert: &Cert) -> String {
+    match cert.subject_common_names() {
+        Ok(cns) if !cns.is_empty() => format!("CN={}", cns.join(", ")),
+        _ => "(no common name)".to_string(),
+    }
+}
+
+/// Resolves the file input source and loads its certificate(s).
+///
+/// Enforces input-source rules shared with `--from-host`:
+///
+/// - With the `fetch` feature, a positional `<PATH>` and `--from-host` are
+///   mutually exclusive, and at least one must be given. (The `--from-host`
+///   branch is handled before this is reached, so here `from_host` must be
+///   absent.)
+/// - Without the `fetch` feature, only `<PATH>` exists and is required.
+///
+/// # Errors
+///
+/// Returns an error if no input was given, if both a path and `--from-host`
+/// were supplied, or if the file cannot be read / parsed.
+fn load_input_certs(args: &Args) -> Result<Vec<Cert>> {
+    let Some(path) = args.path.as_deref() else {
+        #[cfg(feature = "fetch")]
+        {
+            bail!("no input given (provide a <PATH> or --from-host <host>)");
+        }
+        #[cfg(not(feature = "fetch"))]
+        {
+            bail!(
+                "no input given (provide a <PATH>; this build has no --from-host support — rebuild with --features fetch)"
+            );
+        }
+    };
+    load_certs(path)
 }
 
 /// Reads `path` and returns every certificate it contains, in input order.

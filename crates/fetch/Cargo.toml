@@ -1,0 +1,37 @@
+[package]
+name = "fetch"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Pinned 2026-06-15 to latest stable releases (see feature 07 plan.md).
+# rustls crypto provider = `ring` (user-chosen, A03 supply-chain): avoids the
+# aws-lc-rs C/cmake build dependency. `default-features = false` drops the
+# default aws-lc-rs provider; we opt into `ring` + `std` + `tls12` explicitly.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+# Shared cert/key types used across rustls + webpki-roots.
+rustls-pki-types = "1"
+# Mozilla root store for the (separate) verification pass.
+webpki-roots = "1"
+# Bumped to 2 to match the workspace convention (x509-parser's `thiserror ^2`).
+thiserror = "2"
+
+[dev-dependencies]
+# In-test certificate authority for the hermetic local TLS server fixture
+# (feature 07 task 04). `default-features = false` + `ring` keeps the crypto
+# backend consistent with the crate's `ring` rustls provider and avoids the
+# aws-lc-rs C/cmake build dependency (A03 supply-chain). `pem` is unused at
+# runtime; we serialize cert + key as DER directly into the rustls server config.
+# Pinned 2026-06-18 to latest stable 0.14.8.
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+
+[features]
+# The crate's network/TLS capability. On by default within the crate so it is
+# directly buildable/testable; the CLI re-gates it behind its own `fetch`
+# feature so the binary stays network-free unless explicitly enabled.
+default = ["fetch"]
+fetch = []

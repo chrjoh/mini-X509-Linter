@@ -470,6 +470,83 @@ pub fn render_json(outcomes: &[LintOutcome], min: Severity) -> Result<String> {
     serde_json::to_string_pretty(&filtered).context("failed to serialize lint outcomes to JSON")
 }
 
+/// A single certificate entry in the presented chain, for `--from-host` output.
+///
+/// Carries the certificate's position-derived `label` (e.g. `"Certificate 1
+/// (leaf)"`) and a best-effort `subject` line (the subject common name, or a
+/// placeholder when none is present). Only the leaf is linted; the other entries
+/// are chain context.
+#[cfg(feature = "fetch")]
+#[derive(Debug, Clone)]
+pub struct ChainEntry {
+    /// Human-readable label, e.g. `"Certificate 1 (leaf)"`.
+    pub label: String,
+    /// Best-effort subject description (common name or a placeholder).
+    pub subject: String,
+}
+
+/// Renders the presented chain and the verification verdict as a deterministic
+/// text section, for the `--from-host` path.
+///
+/// The section is clearly separated from (and emitted before) the leaf's lint
+/// findings: it lists each presented certificate under `presented chain:` and a
+/// final `verification: valid` / `verification: invalid: <reason>` line. Output
+/// is deterministic so it stays golden-friendly.
+#[cfg(feature = "fetch")]
+pub fn render_chain_section_text(
+    entries: &[ChainEntry],
+    verdict: &fetch::VerificationVerdict,
+) -> String {
+    let mut out = String::new();
+    out.push_str("presented chain:\n");
+    for entry in entries {
+        out.push_str(&format!("  {} {}\n", entry.label, entry.subject));
+    }
+    out.push_str(&format!("verification: {}\n", verdict_line(verdict)));
+    out.push('\n');
+    out
+}
+
+/// Builds the `{ "presented_chain": [...], "verification": {...} }` JSON value
+/// for the `--from-host` path, kept distinct from the lint `outcomes`.
+#[cfg(feature = "fetch")]
+pub fn chain_section_json(
+    entries: &[ChainEntry],
+    verdict: &fetch::VerificationVerdict,
+) -> serde_json::Value {
+    let chain: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "label": e.label,
+                "subject": e.subject,
+            })
+        })
+        .collect();
+
+    let verification = match verdict {
+        fetch::VerificationVerdict::Valid => serde_json::json!({ "valid": true }),
+        fetch::VerificationVerdict::Invalid { reason } => serde_json::json!({
+            "valid": false,
+            "reason": reason,
+        }),
+    };
+
+    serde_json::json!({
+        "presented_chain": chain,
+        "verification": verification,
+    })
+}
+
+/// The compact `valid` / `invalid: <reason>` rendering of a verdict.
+#[cfg(feature = "fetch")]
+fn verdict_line(verdict: &fetch::VerificationVerdict) -> String {
+    match verdict {
+        fetch::VerificationVerdict::Valid => "valid".to_string(),
+        fetch::VerificationVerdict::Invalid { reason } => format!("invalid: {reason}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,6 +925,59 @@ mod tests {
             let first = render_text_chain(&certs, Severity::Notice, Verbosity::PerLint, None);
             let second = render_text_chain(&certs, Severity::Notice, Verbosity::PerLint, None);
             assert_eq!(first, second);
+        }
+    }
+
+    #[cfg(feature = "fetch")]
+    mod chain_section {
+        use super::*;
+
+        fn entries() -> Vec<ChainEntry> {
+            vec![
+                ChainEntry {
+                    label: "Certificate 1 (leaf)".to_string(),
+                    subject: "CN=example.com".to_string(),
+                },
+                ChainEntry {
+                    label: "Certificate 2".to_string(),
+                    subject: "CN=Intermediate CA".to_string(),
+                },
+            ]
+        }
+
+        #[test]
+        fn text_lists_chain_and_valid_verdict() {
+            let text = render_chain_section_text(&entries(), &fetch::VerificationVerdict::Valid);
+            assert!(text.contains("presented chain:"));
+            assert!(text.contains("Certificate 1 (leaf) CN=example.com"));
+            assert!(text.contains("Certificate 2 CN=Intermediate CA"));
+            assert!(text.contains("verification: valid"));
+        }
+
+        #[test]
+        fn text_shows_invalid_reason() {
+            let verdict = fetch::VerificationVerdict::Invalid {
+                reason: "certificate has expired".to_string(),
+            };
+            let text = render_chain_section_text(&entries(), &verdict);
+            assert!(text.contains("verification: invalid: certificate has expired"));
+        }
+
+        #[test]
+        fn json_keeps_chain_and_verdict_distinct() {
+            let value = chain_section_json(&entries(), &fetch::VerificationVerdict::Valid);
+            assert_eq!(value["presented_chain"].as_array().unwrap().len(), 2);
+            assert_eq!(value["verification"]["valid"], serde_json::json!(true));
+        }
+
+        #[test]
+        fn json_invalid_carries_reason() {
+            let verdict = fetch::VerificationVerdict::Invalid {
+                reason: "untrusted root".to_string(),
+            };
+            let value = chain_section_json(&entries(), &verdict);
+            assert_eq!(value["verification"]["valid"], serde_json::json!(false));
+            assert_eq!(value["verification"]["reason"], "untrusted root");
         }
     }
 

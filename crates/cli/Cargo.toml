@@ -7,6 +7,13 @@ edition = "2024"
 name = "mini-x509-lint"
 path = "src/main.rs"
 
+[features]
+# Network is OPT-IN: the default build pulls in NO TLS/network dependency.
+# Build/run with fetch support via:
+#   cargo build -p cli --features fetch
+#   cargo run -p cli --features fetch -- --from-host example.com
+fetch = ["dep:fetch"]
+
 [dependencies]
 # `serde` feature enables Serialize on the contract types for JSON output.
 linter = { path = "../linter", features = ["serde"] }
@@ -15,6 +22,9 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 # JSON formatter. Pinned 2026-06-16 to latest stable 1.0.150.
 serde_json = "1"
+# TLS retrieval (feature 07). Optional + behind the `fetch` feature so a default
+# build has no network dependency. Deliberately NOT in `default`.
+fetch = { path = "../fetch", optional = true }
 
 [dev-dependencies]
 # Snapshot testing for the golden-file tests (feature 06 task 04).

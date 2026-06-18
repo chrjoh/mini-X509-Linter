@@ -1,23 +1,25 @@
 ---
 agent: tester
 seq: 4
-title: Fetch tests against a hermetic local TLS server
-status: pending
+title: Fetch tests against a hermetic local TLS server + --save coverage
+status: done
 touches:
   - crates/fetch/Cargo.toml
   - crates/fetch/tests/handshake.rs
   - crates/fetch/tests/validation.rs
+  - crates/cli/tests/save.rs
 depends_on:
   - 02-cli-from-host-wiring
 ---
 
-# Task: Fetch tests against a hermetic local TLS server
+# Task: Fetch tests against a hermetic local TLS server + --save coverage
 
 ## Goal
 
 Test the `fetch` crate offline and deterministically: stand up a local `rustls` server with
 a known cert, fetch from it, and assert the captured chain and verdict. Also unit-test host
-validation and SNI rules.
+validation and SNI rules. Additionally cover the CLI `--save` capability (PEM bundle write,
+overwrite policy, round-trip re-lint, write-failure errors) hermetically.
 
 ## Files Owned (conflict scope)
 
@@ -25,6 +27,8 @@ validation and SNI rules.
   dep and `rcgen` for an in-test cert)
 - `crates/fetch/tests/handshake.rs`
 - `crates/fetch/tests/validation.rs`
+- `crates/cli/tests/save.rs` (new — CLI-level `--save` integration tests; reuse the local
+  rustls server fixture)
 
 ## Steps
 
@@ -48,6 +52,22 @@ validation and SNI rules.
      the budget (keep this test fast and hermetic; prefer a non-listening local port that
      refuses quickly, or skip if it can't be made deterministic — document the choice).
 
+4. `crates/cli/tests/save.rs` (CLI-level, `--features fetch`, reuse the local server; use a
+   temp dir for output paths):
+   - `--from-host <local> --save <path>` writes a PEM bundle containing the **full presented
+     chain** (leaf + intermediates, presentation order); the file parses as valid PEM and the
+     leaf round-trips. Linting still runs/renders alongside the save.
+   - **Round-trip:** re-lint the saved file via the normal `<PATH>` input and assert the leaf
+     findings match the live-fetch run.
+   - `--save` / `--force` **without** `--from-host` → clear error (saving a file input is
+     pointless).
+   - **Overwrite policy:** save over an existing file without `--force` → refuses (clear error,
+     file unchanged); with `--force` → overwrites.
+   - **Write failure:** `--save` to a path with a missing parent directory → generic error,
+     non-zero exit, no panic.
+   - Save happens regardless of verdict (the local self-signed server yields `Invalid`, yet
+     the file is still written).
+
 Tests must be hermetic (no real network) so CI stays offline.
 
 ## Acceptance Criteria
@@ -57,8 +77,14 @@ Tests must be hermetic (no real network) so CI stays offline.
 - [ ] Verdict is `Invalid` for the untrusted self-signed test cert, while the chain is
       still captured.
 - [ ] Validation tests cover host shape, port range, SNI rules, and the SSRF guard.
-- [ ] `cargo test -p fetch`, `cargo clippy --all-targets -- -D warnings`,
-      `cargo fmt --check` pass; no network access required.
+- [ ] `--save` writes a re-lintable PEM bundle of the full presented chain; round-trip
+      re-lint yields the same leaf findings.
+- [ ] `--save`/`--force` without `--from-host` errors; overwrite refused without `--force`,
+      succeeds with `--force`; missing-parent-dir write failure → generic error + non-zero
+      exit; save occurs regardless of verdict.
+- [ ] `cargo test -p fetch`, `cargo test --features fetch`,
+      `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` pass; no network
+      access required.
 
 ## Notes / Dependencies
 

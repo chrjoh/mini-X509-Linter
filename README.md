@@ -2,15 +2,19 @@
 
 A from-scratch X.509 certificate linter in Rust, inspired by
 [zlint](https://github.com/zmap/zlint). It parses a certificate and runs a registry of
-focused lints drawn from three rule sources — **RFC 5280** (structural conformance),
-the **CA/Browser Forum Baseline Requirements** (publicly-trusted TLS server rules), and a
-set of pragmatic **hygiene** checks — then reports the findings in human-readable text or
-machine-readable JSON.
+**66** focused lints drawn from seven rule sources — **RFC 5280** (structural
+conformance), a set of **post-quantum (PQC)** checks, the **CA/Browser Forum** profiles
+(**Baseline Requirements**, **Extended Validation**, **Code Signing**, and **S/MIME**),
+and a set of pragmatic **hygiene** checks — then reports the findings in human-readable
+text or machine-readable JSON.
 
 The project is a Cargo workspace:
 
 - `crates/linter/` — the library: certificate parsing facade, lint engine, and the rule
   registry. **No network access.**
+- `crates/fetch/` — a standalone crate that performs a blocking TLS handshake to retrieve a
+  certificate chain from a live host. All network/TLS dependencies live here; it does **not**
+  depend on `linter`. Used by the CLI's opt-in `fetch` feature.
 - `crates/cli/` — the `mini-x509-lint` binary: argument parsing, input loading, output
   formatting, and exit-code logic.
 
@@ -25,6 +29,15 @@ cargo build
 
 # Build an optimized binary
 cargo build --release
+```
+
+Fetching a certificate from a live host (`--from-host`) is gated behind an **opt-in**
+`fetch` cargo feature, which is **not** in the default feature set — file linting works
+without it. Build with the feature when you need live fetch:
+
+```sh
+# Build the CLI with the live-fetch capability
+cargo build -p cli --features fetch
 ```
 
 The binary is named **`mini-x509-lint`**:
@@ -53,19 +66,28 @@ contain multiple certificates (see [`--chain`](#chain-linting)).
 
 ```
 mini-x509-lint [OPTIONS] <PATH>
+mini-x509-lint [OPTIONS] --from-host <HOST[:PORT]>   # requires --features fetch
 ```
 
-`<PATH>` is the (required) path to a certificate file (PEM or DER, auto-detected).
+The input is **either** a positional `<PATH>` (a certificate file, PEM or DER,
+auto-detected) **or** `--from-host` — the two are **mutually exclusive** and exactly one
+must be given.
 
 | Flag | Values | Default | Description |
 |------|--------|---------|-------------|
 | `--format` | `text`, `json` | `text` | Output format. `text` is grouped by rule source; `json` is a nested array, one object per lint. |
-| `--source` | comma-separated subset of `rfc5280`, `cabf_br`, `hygiene` | all | Restrict which rule sources run. |
+| `--source` | comma-separated subset of `rfc5280`, `pqc`, `cabf_br`, `cabf_ev`, `cabf_cs`, `cabf_smime`, `hygiene` | all | Restrict which rule sources run. |
 | `--min-severity` | `notice`, `warn`, `error`, `fatal` | `notice` | Drop findings below this level at the reporting boundary (they are not shown and do not affect the exit code). |
 | `--fail-on` | `notice`, `warn`, `error`, `fatal` | `error` | Exit non-zero if any *surfaced* finding is at or above this level. |
 | `--chain` | (flag) | off | Lint **every** certificate in a PEM bundle, not just the first. |
 | `--verbose`, `-v` | (flag) | off | Text only: list every lint individually (pass / `n/a` + `lint_id`) instead of the collapsed summary, and print a resolved `purpose:` header. |
-| `--purpose` | `auto`, `tls-server`, `generic` | `auto` | Scope which sources apply based on the cert's intended purpose (see below). |
+| `--purpose` | `auto`, `tls-server`, `code-signing`, `smime`, `generic` | `auto` | Scope which sources apply based on the cert's intended purpose (see below). |
+| `--from-host` | `host[:port]` | — | *(requires `--features fetch`)* Fetch the certificate from a live host over TLS instead of reading a file (default port `443`). Mutually exclusive with `<PATH>`. See [Fetching from a host](#fetching-from-a-host). |
+| `--sni` | name | derived | *(requires `--features fetch`)* SNI to send in the handshake. **Required** when `--from-host` is an IP address; derived from the hostname otherwise, and overridable. |
+| `--timeout` | seconds | `10` | *(requires `--features fetch`)* Connection + handshake timeout for `--from-host`. |
+| `--save` | `path` | — | *(requires `--features fetch`)* Also write the full presented chain (leaf + intermediates) to `<path>` as a PEM bundle. Only valid with `--from-host`. Refuses to overwrite unless `--force`. |
+| `--force` | (flag) | off | *(requires `--features fetch`)* Allow `--save` to overwrite an existing file. |
+| `--block-private` | (flag) | off | *(requires `--features fetch`)* Opt-in SSRF guard: refuse `--from-host` targets that resolve to private / loopback / link-local addresses. Off by default (this is a local CLI for validating your own / internal hosts). |
 | `-h`, `--help` | | | Print help. |
 
 Severity ordering, lowest to highest: **notice < warn < error < fatal**. There is no
@@ -105,7 +127,8 @@ mini-x509-lint --fail-on warn --min-severity warn certs/leaf.pem
 
 ## Rule sources & the `--purpose` model
 
-Lints are grouped into three sources:
+Lints are grouped into seven sources: `rfc5280`, `pqc`, `cabf_br`, `cabf_ev`, `cabf_cs`,
+`cabf_smime`, and `hygiene` (66 lints in total). A representative subset:
 
 - **`hygiene`** (4 lints) — `hygiene_not_expired`, `hygiene_no_sha1_signature`,
   `hygiene_rsa_key_min_2048`, `hygiene_ecdsa_curve_allowlist`.
@@ -126,9 +149,11 @@ EKU) produces false positives. `--purpose` scopes which sources apply:
 
 | `--purpose` | Sources run |
 |-------------|-------------|
-| `tls-server` | `rfc5280` + `hygiene` + `cabf_br` |
-| `generic` | `rfc5280` + `hygiene` (skips `cabf_br`) |
-| `auto` (default) | resolved **per certificate**: if the cert asserts the serverAuth EKU (OID `1.3.6.1.5.5.7.3.1`) it is treated as `tls-server`, otherwise as `generic`. |
+| `tls-server` | `rfc5280` + `pqc` + `hygiene` + `cabf_br` + `cabf_ev` |
+| `code-signing` | `rfc5280` + `pqc` + `hygiene` + `cabf_cs` |
+| `smime` | `rfc5280` + `pqc` + `hygiene` + `cabf_smime` |
+| `generic` | `rfc5280` + `pqc` + `hygiene` (skips the profile-specific sources) |
+| `auto` (default) | resolved **per certificate** from its EKU: codeSigning → `code-signing`, else serverAuth (OID `1.3.6.1.5.5.7.3.1`) → `tls-server`, else emailProtection → `smime`, otherwise → `generic`. |
 
 So by default a non-TLS certificate does **not** trip the BR lints. `auto` is a heuristic;
 `--purpose tls-server` forces the BR set even when serverAuth is absent (useful to assert
@@ -140,8 +165,8 @@ purpose-allowed sources and the `--source` selection. For example
 `--purpose tls-server --source rfc5280` runs only `rfc5280`. Sources dropped by `--purpose`
 are simply not run — they do not appear as `not_applicable` outcomes.
 
-Reserved future values `client`, `smime`, and `code-signing` are documented but **not yet
-implemented**.
+The `client` purpose is reserved as a planned future value but is **not yet implemented**
+(it currently behaves like `generic`).
 
 ## Examples
 
@@ -321,6 +346,119 @@ summary: 1 warn
 
 Without `--chain`, only the first certificate in the bundle is linted.
 
+## Fetching from a host
+
+Instead of reading a file, the CLI can retrieve a certificate directly from a live host
+over a TLS handshake with `--from-host`. This capability is gated behind the **opt-in**
+`fetch` cargo feature (see [Installation & build](#installation--build)); file linting works
+without it.
+
+```sh
+cargo run -p cli --features fetch -- --from-host example.com
+```
+
+`--from-host` takes `host[:port]` and defaults to port `443`. It is **mutually exclusive**
+with the positional `<PATH>` — choose exactly one input source.
+
+### SNI rules
+
+- **Hostname target** (`example.com`): the SNI is derived from the hostname by default, and
+  `--sni <name>` overrides it.
+- **IP target** (`192.0.2.10`): the SNI cannot be derived from an IP, so `--sni <name>` is
+  **required**; the run errors clearly if it is missing.
+
+`--timeout <secs>` (default `10`) bounds the connection and handshake.
+
+### Leaf linting vs. chain verification
+
+Only the **leaf** certificate is linted — it flows into the same engine and produces the
+same findings as a file input. The intermediates the server presents are displayed as
+**chain context** (not linted).
+
+Alongside the findings, the output shows a separate chain **verification verdict**
+(`verification: valid` or `verification: invalid: <reason>`). This is distinct from the lint
+findings: the verdict is the result of validating the presented chain against a trusted root
+store, whereas the findings are the leaf's lint results.
+
+> **Security note.** The handshake uses an accept-any verifier whose *only* purpose is to
+> capture the presented chain, so that untrusted / expired / self-signed certificates can
+> still be inspected. The verification verdict is produced by a **separate, real**
+> verification pass against a root store — capturing the chain and judging it are two
+> independent steps. `--block-private` opts into an SSRF guard that refuses targets resolving
+> to private / loopback / link-local addresses; it is off by default because this is a local
+> CLI meant for validating your own / internal hosts.
+
+#### Example (`--from-host`)
+
+```sh
+$ cargo run -p cli --features fetch -- --from-host example.com
+presented chain:
+  Certificate 1 (leaf) example.com
+  Certificate 2 Example Intermediate CA
+verification: valid
+
+[rfc5280]
+  (3 passed, 3 not applicable)
+[cabf_br]
+  (4 passed, 0 not applicable)
+[hygiene]
+  (3 passed, 1 not applicable)
+OK: no findings
+summary: no findings
+```
+
+A host presenting an expired or otherwise untrusted certificate still yields the captured
+chain plus a `verification: invalid: <reason>` line; the leaf's lint findings are reported
+exactly as for a file input.
+
+### Saving the presented chain (`--save` / `--force`)
+
+`--save <path>` also writes the **full presented chain** (leaf + intermediates, in
+presentation order) to disk as a **PEM bundle** — concatenated
+`-----BEGIN CERTIFICATE-----` blocks, one per certificate. Notes:
+
+- `--save` is **only valid with `--from-host`** — using it with a `<PATH>` file input (or
+  with no input) is an error, since saving a cert you read from a file is pointless.
+- The save runs **regardless of the verification verdict** (even expired / self-signed /
+  untrusted chains are captured), and is independent of linting: a save does not change the
+  lint/render flow, and linting still proceeds normally.
+- It **refuses to overwrite** an existing file unless `--force` is given. The parent
+  directory must already exist (it is not created).
+- The saved bundle is **re-lintable** later via the normal `<PATH>` input (the linter
+  auto-detects and reads multi-cert PEM — combine with `--chain` to lint every cert in it).
+- A `saved presented chain to <path>` confirmation line is printed to **stderr** so it never
+  pollutes stdout.
+
+#### Example (`--from-host ... --save`)
+
+```sh
+$ cargo run -p cli --features fetch -- --from-host example.com --save chain.pem
+saved presented chain to chain.pem          # (stderr)
+presented chain:
+  Certificate 1 (leaf) example.com
+  Certificate 2 Example Intermediate CA
+verification: valid
+
+[rfc5280]
+  (3 passed, 3 not applicable)
+[cabf_br]
+  (4 passed, 0 not applicable)
+[hygiene]
+  (3 passed, 1 not applicable)
+OK: no findings
+summary: no findings
+
+# Re-lint the saved bundle later, leaf-only or every cert:
+$ mini-x509-lint chain.pem
+$ mini-x509-lint --chain chain.pem
+```
+
+Use `--force` to allow `--save` to overwrite an existing file:
+
+```sh
+$ cargo run -p cli --features fetch -- --from-host example.com --save chain.pem --force
+```
+
 ## Scope & limitations
 
 This is a deliberately small linter; be aware of the boundaries:
@@ -332,10 +470,12 @@ This is a deliberately small linter; be aware of the boundaries:
 - **The CA/Browser Forum BR lints are simplified.** They implement a focused subset of the
   Baseline Requirements (validity window, CN-in-SAN, internal/reserved names, serverAuth
   EKU presence), not the full specification.
-- **No network access.** The `linter` crate never touches the network. Fetching a
-  certificate from a live host (`--from-host` / `--sni` / `--timeout`) is planned for a
-  separate `fetch` feature and is **not** available in this version.
-- Reserved `--purpose` values (`client`, `smime`, `code-signing`) are not implemented.
+- **The `linter` crate never touches the network.** Live fetch
+  (`--from-host` / `--sni` / `--timeout` / `--save`) lives entirely in the standalone
+  `fetch` crate behind the CLI's opt-in `fetch` feature; the lint engine itself stays
+  network-free.
+- The reserved `--purpose client` value is not yet implemented (it currently behaves like
+  `generic`).
 
 ## Development
 

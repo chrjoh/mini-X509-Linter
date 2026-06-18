@@ -2,7 +2,7 @@
 agent: developer
 seq: 1
 title: Standalone fetch crate — blocking handshake + verify verdict
-status: pending
+status: done
 touches:
   - crates/fetch/Cargo.toml
   - crates/fetch/src/lib.rs
@@ -28,8 +28,14 @@ depend on `linter`.
 ## Steps
 
 1. `crates/fetch/Cargo.toml`:
-   - deps (pin current): `rustls = "0.23"`, `rustls-pki-types = "1"`, `webpki-roots = "1"`,
-     `thiserror = "1"`.
+   - deps (pin current, caret style to match workspace convention): `rustls = "0.23"`,
+     `rustls-pki-types = "1"`, `webpki-roots = "1"`, `thiserror = "2"` (workspace is on thiserror 2 —
+     matches x509-parser's `thiserror ^2`; do NOT use 1).
+   - **rustls crypto provider = `ring`** (user-chosen, A03 supply-chain): use
+     `rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }`
+     — NOT the default aws-lc-rs provider (avoids the aws-lc-sys C/cmake build dependency). Install the
+     ring provider as the process default (`CryptoProvider::install_default(rustls::crypto::ring::default_provider())`
+     once) or build configs with it explicitly. Keep webpki-roots/WebPkiServerVerifier compatible with ring.
    - `[features]` with a `fetch` feature gating the network capability per the plan
      (decide whether the crate's network code is always-on within the crate but the CLI
      gates it; the plan asks for a `fetch` feature — implement it on the CLI side, and
