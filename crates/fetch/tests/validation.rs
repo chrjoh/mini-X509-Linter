@@ -68,6 +68,11 @@ mod target_shape {
         assert!(matches!(t.host(), HostKind::Ip(_)));
         assert_eq!(t.port(), 8443);
     }
+    #[test]
+    fn ipv6_literal_is_classified_as_ip() {
+        let t = Target::parse("2001:2042:303c:3300::1db9").unwrap();
+        assert!(matches!(t.host(), HostKind::Ip(_)));
+    }
 }
 
 mod sni_rules {
