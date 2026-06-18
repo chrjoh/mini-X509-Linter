@@ -2,7 +2,7 @@
 agent: tester
 seq: 3
 title: PQC fixture + certificate inspection tests
-status: pending
+status: done
 touches:
   - testdata/slh_dsa_root_ca.pem
   - testdata/generate.sh

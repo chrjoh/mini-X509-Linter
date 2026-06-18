@@ -1,0 +1,30 @@
+---
+source: crates/cli/tests/inspect.rs
+assertion_line: 102
+expression: out
+---
+Certificate Summary
+  Version:             v3
+  Serial:              11
+  Subject:             CN=good.example.com
+  Issuer:              CN=good.example.com
+  Not Before:          Jun  1 00:00:00 2026 +00:00
+  Not After:           Jun  1 00:00:00 2027 +00:00
+  Signature Algorithm: sha256WithRSAEncryption (1.2.840.113549.1.1.11)
+  Public Key:          rsaEncryption (1.2.840.113549.1.1.1), 2048 bits
+  Basic Constraints:   CA:false (not critical)
+  Key Usage:           (not present)
+  Subject Alt Name:    DNS:good.example.com (not critical)
+
+[rfc5280]
+  (7 passed, 9 not applicable)
+[pqc]
+  (0 passed, 5 not applicable)
+[cabf_br]
+  (12 passed, 0 not applicable)
+[cabf_ev]
+  (0 passed, 9 not applicable)
+[hygiene]
+  (3 passed, 1 not applicable)
+OK: no findings
+summary: no findings

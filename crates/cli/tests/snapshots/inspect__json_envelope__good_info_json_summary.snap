@@ -1,0 +1,42 @@
+---
+source: crates/cli/tests/inspect.rs
+assertion_line: 313
+expression: "value[\"summary\"]"
+---
+{
+  "basic_constraints": {
+    "ca": false,
+    "critical": false,
+    "path_len": null
+  },
+  "issuer": "CN=good.example.com",
+  "key_usage": null,
+  "public_key": {
+    "algorithm": {
+      "name": "rsaEncryption",
+      "oid": "1.2.840.113549.1.1.1"
+    },
+    "curve": null,
+    "key_bits": 2048
+  },
+  "serial": "11",
+  "signature_algorithm": {
+    "name": "sha256WithRSAEncryption",
+    "oid": "1.2.840.113549.1.1.11"
+  },
+  "subject": "CN=good.example.com",
+  "subject_alt_name": {
+    "critical": false,
+    "entries": [
+      {
+        "kind": "DNS",
+        "value": "good.example.com"
+      }
+    ]
+  },
+  "validity": {
+    "not_after": "Jun  1 00:00:00 2027 +00:00",
+    "not_before": "Jun  1 00:00:00 2026 +00:00"
+  },
+  "version": "v3"
+}

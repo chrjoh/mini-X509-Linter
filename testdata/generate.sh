@@ -1135,3 +1135,45 @@ echo "wrote $HERE/pqc_unknown_param_set.pem (SPKI OID arc .20 -> .32, unassigned
 rm -f "$PQC_DERLIB" "$PQC_MLDSA_KEY" "$PQC_MLDSA_CNF" "$PQC_SLHDSA_KEY" \
   "$PQC_SLHDSA_CNF" "$PQC_BADKU_CNF" "$PQC_MLDSA_DER" "$PQC_SLHDSA_DER" \
   "$PQC_PATCH_OUT"
+
+# ============================================================================
+# Feature 08 (certificate inspection / `--info`) — SLH-DSA root CA fixture
+# ============================================================================
+# Self-contained section. Generates `slh_dsa_root_ca.pem`: a self-signed
+# SLH-DSA-SHA2-128s (SPHINCS+) POST-QUANTUM ROOT CA, used by the `--info`
+# inspection tests (crates/cli/tests/inspect.rs).
+#
+# WHY a distinct fixture: feature 13 already ships `pqc_slhdsa_good.pem`, but
+# that is an SLH-DSA *leaf* with no KeyUsage extension. The inspection tests
+# need a cert that carries a KeyUsage extension with MULTIPLE bits set (plus
+# critical) so the summary's KeyUsage-bit display is genuinely exercised — hence
+# a fresh ROOT CA here.
+#
+# PROVENANCE (HARD PROJECT RULE): generated with openssl 3.6.2 (which supports
+# SLH-DSA natively), NEVER sourced from the user's external `cert-bar` tool. The
+# linter must remain an INDEPENDENT oracle for cert-bar's output, so a
+# cert-bar-derived fixture would create a circular validation dependency.
+#
+# Exercises in the summary: a PQC signature/public-key algorithm (OID
+# 2.16.840.1.101.3.4.3.20 — not known to oid-registry, but the linter enriches
+# it to the name "SLH-DSA-SHA2-128s" via the feature-13 classification);
+# KeyUsage PRESENT with keyCertSign + cRLSign + critical; BasicConstraints
+# CA:TRUE critical; a SAN; and subject == issuer (self-signed root).
+#
+# DETERMINISM: a fixed serial (301) and a fixed, long validity window
+# (2026-01-01 -> 2126-01-01) are pinned so the committed fixture — and therefore
+# the `--info` snapshot — is reproducible. The summary shows only the cert's own
+# dates (never wall-clock time), so the snapshot stays stable.
+SLH_CA_KEY="$(mktemp)"
+openssl genpkey -algorithm SLH-DSA-SHA2-128s -out "$SLH_CA_KEY" >/dev/null 2>&1
+openssl req -x509 -new -key "$SLH_CA_KEY" \
+  -subj "/CN=SLH-DSA Test Root/C=SE/O=mini-x509-linter testdata" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectAltName=DNS:slh-dsa-test-root" \
+  -set_serial 301 \
+  -not_before 20260101000000Z -not_after 21260101000000Z \
+  -out "$HERE/slh_dsa_root_ca.pem" >/dev/null 2>&1
+echo "wrote $HERE/slh_dsa_root_ca.pem (self-signed SLH-DSA-SHA2-128s root CA, openssl-native)"
+# The throwaway private key is not committed.
+rm -f "$SLH_CA_KEY"

@@ -2,7 +2,7 @@
 agent: developer
 seq: 1
 title: Cert facade inspection accessors
-status: pending
+status: done
 touches:
   - crates/linter/src/cert.rs
 depends_on: []

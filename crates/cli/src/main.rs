@@ -24,6 +24,14 @@
 //! - `--verbose` / `-v` — opt-in per-lint text listing. Affects `--format text`
 //!   only; `--format json` already emits every lint and is unchanged. Does not
 //!   affect the exit code.
+//! - `--info` — long-only inspection flag (no short alias). When set, a
+//!   deterministic certificate **summary** block for the leaf is printed first
+//!   (text or JSON per `--format`), then the lint report is still run and
+//!   printed exactly as without the flag. `--info` does not suppress linting and
+//!   does not change the exit code. In `--format json` mode the document becomes
+//!   `{ "summary": {…}, "lints": [ … ] }`, with the `lints` array preserving the
+//!   existing per-outcome shape verbatim. Omitting `--info` leaves the output
+//!   byte-for-byte unchanged.
 //! - `--purpose <auto|tls-server|code-signing|smime|generic>` — scopes which
 //!   lint **sources** apply based on the certificate's intended purpose (default
 //!   `auto`). It maps to a [`linter::CertPurpose`] whose allowed-source set is
@@ -35,6 +43,7 @@
 //! Exit code: `0` when no surfaced finding reaches `--fail-on`; `1` when one
 //! does. A load/parse/usage error exits non-zero via the process error path.
 
+mod inspect;
 mod output;
 #[cfg(feature = "fetch")]
 mod save;
@@ -215,6 +224,14 @@ struct Args {
     /// Scope which lint sources apply to the certificate's intended purpose.
     #[arg(long, value_enum, default_value_t = CliPurpose::Auto)]
     purpose: CliPurpose,
+
+    /// Print a certificate summary block for the leaf before the lint report.
+    ///
+    /// Long-only (no short alias). Does not suppress linting and does not change
+    /// the exit code. With `--format json` the document becomes
+    /// `{ "summary": {…}, "lints": [ … ] }`.
+    #[arg(long)]
+    info: bool,
 }
 
 /// The full set of sources, used when `--source` is omitted. Order matches the
@@ -390,17 +407,36 @@ fn run(args: &Args) -> Result<ExitCode> {
             verbosity,
             &header,
             args.format,
+            args.info,
         )
     } else {
         let effective = effective_sources(purpose, leaf, &selected);
         let outcomes = registry.run_filtered(leaf, &effective);
 
         let report = match args.format {
-            Format::Text => output::render_text_opts(&outcomes, min, verbosity, Some(&header)),
+            Format::Text => {
+                let lint_report =
+                    output::render_text_opts(&outcomes, min, verbosity, Some(&header));
+                if args.info {
+                    // Summary first, a blank-line separator, then the lint report.
+                    format!(
+                        "{summary}\n{lint_report}",
+                        summary = inspect::render_summary_text(leaf)
+                    )
+                } else {
+                    lint_report
+                }
+            }
             Format::Json => {
-                let mut json = output::render_json(&outcomes, min)?;
-                json.push('\n');
-                json
+                if args.info {
+                    let mut json = render_info_json(leaf, &outcomes, min)?;
+                    json.push('\n');
+                    json
+                } else {
+                    let mut json = output::render_json(&outcomes, min)?;
+                    json.push('\n');
+                    json
+                }
             }
         };
         print!("{report}");
@@ -410,7 +446,54 @@ fn run(args: &Args) -> Result<ExitCode> {
     }
 }
 
+/// Builds the `--info --format json` document for a single leaf:
+/// `{ "summary": {…}, "lints": [ … ] }`.
+///
+/// The `lints` array is the existing per-outcome JSON shape from feature 02,
+/// preserved verbatim (re-parsed so the whole document is one valid object). The
+/// `summary` object is the serialized [`inspect::CertSummary`].
+///
+/// # Errors
+///
+/// Returns an error if either the lint outcomes or the summary cannot be
+/// serialized.
+fn render_info_json(
+    leaf: &Cert,
+    outcomes: &[linter::LintOutcome],
+    min: Severity,
+) -> Result<String> {
+    let lints_json = output::render_json(outcomes, min)?;
+    let lints_value: serde_json::Value =
+        serde_json::from_str(&lints_json).context("failed to re-parse lint outcomes JSON")?;
+    let document = serde_json::json!({
+        "summary": inspect::build_summary_json(leaf),
+        "lints": lints_value,
+    });
+    serde_json::to_string_pretty(&document).context("failed to serialize --info report to JSON")
+}
+
+/// The shared per-certificate chain label, the single source of truth for both
+/// the chain lint report and the `--info` per-cert summary blocks.
+///
+/// Index `0` (the leaf, by leaf-first PEM convention) renders as
+/// `"Certificate 1 (leaf)"`; every other index `idx` renders as
+/// `"Certificate {idx + 1}"`.
+fn chain_label(idx: usize) -> String {
+    if idx == 0 {
+        "Certificate 1 (leaf)".to_string()
+    } else {
+        format!("Certificate {}", idx + 1)
+    }
+}
+
 /// Lints and renders every certificate in the input as a chain.
+///
+/// When `info` is set, a labelled [`inspect::render_summary_text`] block is
+/// emitted for **every** certificate (chain/file order, each preceded by the
+/// same [`chain_label`] the lint report uses), followed by the chain lint report
+/// — and the JSON envelope folds each cert's `summary` next to its `outcomes`
+/// (see [`render_chain_info_json`]). `--info` is additive: it does not suppress
+/// linting and does not change the exit code.
 #[allow(clippy::too_many_arguments)]
 fn run_chain(
     certs: &[Cert],
@@ -422,17 +505,14 @@ fn run_chain(
     verbosity: Verbosity,
     header: &PurposeHeader,
     format: Format,
+    info: bool,
 ) -> Result<ExitCode> {
     // Lint every cert, resolving `auto` against each cert in turn.
     let per_cert: Vec<(String, Vec<linter::LintOutcome>)> = certs
         .iter()
         .enumerate()
         .map(|(idx, cert)| {
-            let label = if idx == 0 {
-                "Certificate 1 (leaf)".to_string()
-            } else {
-                format!("Certificate {}", idx + 1)
-            };
+            let label = chain_label(idx);
             let effective = effective_sources(purpose, cert, selected);
             (label, registry.run_filtered(cert, &effective))
         })
@@ -444,12 +524,29 @@ fn run_chain(
                 .iter()
                 .map(|(label, outcomes)| CertReport::new(label, outcomes))
                 .collect();
-            let report = output::render_text_chain(&reports, min, verbosity, Some(header));
+            let mut report = output::render_text_chain(&reports, min, verbosity, Some(header));
+            if info {
+                // One labelled summary block per cert (chain order), blank-line
+                // separated, then a blank-line separator, then the chain report.
+                let mut section = String::new();
+                for (idx, cert) in certs.iter().enumerate() {
+                    section.push_str(&chain_label(idx));
+                    section.push('\n');
+                    section.push_str(&inspect::render_summary_text(cert));
+                    section.push('\n');
+                }
+                report = format!("{section}{report}");
+            }
             print!("{report}");
         }
         Format::Json => {
-            let json = render_chain_json(&per_cert, min)?;
-            println!("{json}");
+            if info {
+                let json = render_chain_info_json(certs, &per_cert, min)?;
+                println!("{json}");
+            } else {
+                let json = render_chain_json(&per_cert, min)?;
+                println!("{json}");
+            }
         }
     }
 
@@ -492,6 +589,45 @@ fn render_chain_json(
         }));
     }
     serde_json::to_string_pretty(&entries).context("failed to serialize chain JSON")
+}
+
+/// Builds the `--chain --info --format json` document: a per-certificate
+/// envelope that folds each cert's `summary` next to its `outcomes`:
+///
+/// ```json
+/// { "certificates": [ { "certificate": "<label>", "summary": {…}, "outcomes": [ … ] }, … ] }
+/// ```
+///
+/// One object per certificate in chain (file) order. `certificate` is the shared
+/// [`chain_label`] (identical to the `per_cert` label), `summary` is
+/// [`inspect::build_summary_json`] for that cert, and `outcomes` is the existing
+/// feature-02 per-outcome shape (preserved verbatim by re-parsing
+/// [`output::render_json`], exactly as [`render_chain_json`] does).
+///
+/// # Errors
+///
+/// Returns an error if any cert's outcomes or the document cannot be serialized.
+fn render_chain_info_json(
+    certs: &[Cert],
+    per_cert: &[(String, Vec<linter::LintOutcome>)],
+    min: Severity,
+) -> Result<String> {
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(per_cert.len());
+    for (cert, (label, outcomes)) in certs.iter().zip(per_cert.iter()) {
+        // Reuse the single-cert renderer for the per-cert outcomes shape, then
+        // re-parse so the whole document is one valid JSON object.
+        let outcomes_json = output::render_json(outcomes, min)?;
+        let outcomes_value: serde_json::Value = serde_json::from_str(&outcomes_json)
+            .context("failed to re-parse per-cert outcomes JSON")?;
+        entries.push(serde_json::json!({
+            "certificate": label,
+            "summary": inspect::build_summary_json(cert),
+            "outcomes": outcomes_value,
+        }));
+    }
+    let document = serde_json::json!({ "certificates": entries });
+    serde_json::to_string_pretty(&document)
+        .context("failed to serialize --info chain report to JSON")
 }
 
 /// Maps the surfaced severity counts to a process exit code given `--fail-on`.
@@ -599,7 +735,14 @@ fn run_from_host(
 
     match args.format {
         Format::Text => {
-            let mut report = output::render_chain_section_text(&entries, &chain.verdict);
+            let mut report = String::new();
+            if args.info {
+                // Leaf summary first, a blank-line separator, then the chain
+                // section + lint report.
+                report.push_str(&inspect::render_summary_text(&leaf));
+                report.push('\n');
+            }
+            report.push_str(&output::render_chain_section_text(&entries, &chain.verdict));
             report.push_str(&output::render_text_opts(
                 &outcomes,
                 min,
@@ -613,11 +756,20 @@ fn run_from_host(
             let outcomes_value: serde_json::Value = serde_json::from_str(&outcomes_json)
                 .context("failed to re-parse leaf outcomes JSON")?;
             let section = output::chain_section_json(&entries, &chain.verdict);
-            let document = serde_json::json!({
-                "presented_chain": section["presented_chain"],
-                "verification": section["verification"],
-                "outcomes": outcomes_value,
-            });
+            let document = if args.info {
+                serde_json::json!({
+                    "summary": inspect::build_summary_json(&leaf),
+                    "presented_chain": section["presented_chain"],
+                    "verification": section["verification"],
+                    "outcomes": outcomes_value,
+                })
+            } else {
+                serde_json::json!({
+                    "presented_chain": section["presented_chain"],
+                    "verification": section["verification"],
+                    "outcomes": outcomes_value,
+                })
+            };
             let json = serde_json::to_string_pretty(&document)
                 .context("failed to serialize --from-host report to JSON")?;
             println!("{json}");

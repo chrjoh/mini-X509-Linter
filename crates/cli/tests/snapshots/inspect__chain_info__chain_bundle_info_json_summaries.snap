@@ -1,0 +1,84 @@
+---
+source: crates/cli/tests/inspect.rs
+expression: summaries
+---
+[
+  {
+    "certificate": "Certificate 1 (leaf)",
+    "summary": {
+      "basic_constraints": {
+        "ca": false,
+        "critical": false,
+        "path_len": null
+      },
+      "issuer": "CN=chain-leaf.example.com",
+      "key_usage": null,
+      "public_key": {
+        "algorithm": {
+          "name": "rsaEncryption",
+          "oid": "1.2.840.113549.1.1.1"
+        },
+        "curve": null,
+        "key_bits": 2048
+      },
+      "serial": "65",
+      "signature_algorithm": {
+        "name": "sha256WithRSAEncryption",
+        "oid": "1.2.840.113549.1.1.11"
+      },
+      "subject": "CN=chain-leaf.example.com",
+      "subject_alt_name": {
+        "critical": false,
+        "entries": [
+          {
+            "kind": "DNS",
+            "value": "chain-leaf.example.com"
+          }
+        ]
+      },
+      "validity": {
+        "not_after": "Jun  1 00:00:00 2027 +00:00",
+        "not_before": "Jun  1 00:00:00 2026 +00:00"
+      },
+      "version": "v3"
+    }
+  },
+  {
+    "certificate": "Certificate 2",
+    "summary": {
+      "basic_constraints": {
+        "ca": true,
+        "critical": true,
+        "path_len": null
+      },
+      "issuer": "CN=Chain Test Root CA",
+      "key_usage": {
+        "bits": [
+          "Certificate Sign",
+          "CRL Sign"
+        ],
+        "critical": true
+      },
+      "public_key": {
+        "algorithm": {
+          "name": "rsaEncryption",
+          "oid": "1.2.840.113549.1.1.1"
+        },
+        "curve": null,
+        "key_bits": 2048
+      },
+      "serial": "64",
+      "signature_algorithm": {
+        "name": "sha256WithRSAEncryption",
+        "oid": "1.2.840.113549.1.1.11"
+      },
+      "subject": "CN=Chain Test Root CA",
+      "subject_alt_name": null,
+      "validity": {
+        "not_after": "Jan  1 00:00:00 2036 +00:00",
+        "not_before": "Jan  1 00:00:00 2026 +00:00"
+      },
+      "version": "v3"
+    }
+  }
+]

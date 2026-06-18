@@ -2,7 +2,7 @@
 agent: developer
 seq: 2
 title: --info flag + certificate summary renderer
-status: pending
+status: done
 touches:
   - crates/cli/src/inspect.rs
   - crates/cli/src/main.rs

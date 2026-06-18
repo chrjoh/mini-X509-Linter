@@ -1,0 +1,26 @@
+---
+source: crates/cli/tests/inspect.rs
+assertion_line: 144
+expression: out
+---
+Certificate Summary
+  Version:             v3
+  Serial:              01:2D
+  Subject:             CN=SLH-DSA Test Root, C=SE, O=mini-x509-linter testdata
+  Issuer:              CN=SLH-DSA Test Root, C=SE, O=mini-x509-linter testdata
+  Not Before:          Jan  1 00:00:00 2026 +00:00
+  Not After:           Jan  1 00:00:00 2126 +00:00
+  Signature Algorithm: SLH-DSA-SHA2-128s (2.16.840.1.101.3.4.3.20)
+  Public Key:          SLH-DSA-SHA2-128s (2.16.840.1.101.3.4.3.20)
+  Basic Constraints:   CA:true (critical)
+  Key Usage:           Certificate Sign, CRL Sign (critical)
+  Subject Alt Name:    DNS:slh-dsa-test-root (not critical)
+
+[rfc5280]
+  (11 passed, 5 not applicable)
+[pqc]
+  (5 passed, 0 not applicable)
+[hygiene]
+  (2 passed, 2 not applicable)
+OK: no findings
+summary: no findings

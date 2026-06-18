@@ -288,6 +288,108 @@ pub struct TimeEncoding {
     pub is_zulu: bool,
 }
 
+/// An algorithm identified by its OID, with an optional human-readable name.
+///
+/// Display-oriented owned view used by the inspection accessors
+/// [`signature_algorithm`](Cert::signature_algorithm) and the `algorithm`
+/// field of [`PublicKeyInfo`]. The `oid` is always the authoritative
+/// dotted-decimal string; `name` is best-effort: it is filled from
+/// `oid-registry` when the OID is known, or from the post-quantum
+/// classification ([`PublicKeyAlg`] / [`PqcParamSet`]) for ML-DSA / SLH-DSA
+/// arc members, and is `None` for any algorithm with no recognised name. An
+/// unknown algorithm (e.g. an unassigned PQC slot) is never an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub struct AlgorithmId {
+    /// The algorithm OID in dotted-decimal form (e.g. `1.2.840.113549.1.1.11`).
+    pub oid: String,
+    /// A human-readable name (from `oid-registry` or the PQC classification),
+    /// or `None` when no name is known for the OID.
+    pub name: Option<String>,
+}
+
+/// A display-oriented view of the certificate's subject public-key parameters.
+///
+/// Used by the inspection summary. The `algorithm` is always populated (with at
+/// least its raw OID); `key_bits` and `curve` are best-effort and `None` when
+/// the parser does not reasonably expose them (e.g. for a post-quantum key
+/// whose size the facade does not derive). The view degrades gracefully for
+/// unknown algorithms rather than erroring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub struct PublicKeyInfo {
+    /// The subject public-key algorithm (OID plus best-effort name).
+    pub algorithm: AlgorithmId,
+    /// The key size in bits when reasonably available (RSA modulus bits, or the
+    /// EC field size), else `None`.
+    pub key_bits: Option<usize>,
+    /// The named curve (e.g. `prime256v1`) for an EC key, else `None`.
+    pub curve: Option<String>,
+}
+
+/// The full RFC 5280 §4.2.1.3 Key Usage bit set plus the `critical` flag.
+///
+/// Display-oriented owned view returned by [`key_usage_bits`](Cert::key_usage_bits).
+/// Unlike [`KeyUsageView`] (which carries only the subset the lints consume),
+/// this exposes **all nine** KeyUsage bits so the inspection summary can render
+/// every asserted purpose by name. `None` from the accessor means the extension
+/// is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub struct KeyUsageBits {
+    /// `true` if the `digitalSignature` bit (bit 0) is asserted.
+    pub digital_signature: bool,
+    /// `true` if the `nonRepudiation` / `contentCommitment` bit (bit 1) is
+    /// asserted.
+    pub non_repudiation: bool,
+    /// `true` if the `keyEncipherment` bit (bit 2) is asserted.
+    pub key_encipherment: bool,
+    /// `true` if the `dataEncipherment` bit (bit 3) is asserted.
+    pub data_encipherment: bool,
+    /// `true` if the `keyAgreement` bit (bit 4) is asserted.
+    pub key_agreement: bool,
+    /// `true` if the `keyCertSign` bit (bit 5) is asserted.
+    pub key_cert_sign: bool,
+    /// `true` if the `cRLSign` bit (bit 6) is asserted.
+    pub crl_sign: bool,
+    /// `true` if the `encipherOnly` bit (bit 7) is asserted.
+    pub encipher_only: bool,
+    /// `true` if the `decipherOnly` bit (bit 8) is asserted.
+    pub decipher_only: bool,
+    /// `true` if the extension is marked critical.
+    pub critical: bool,
+}
+
+/// A single Subject Alternative Name general name as a display-oriented pair.
+///
+/// `kind` is a stable short label for the general-name variant (`"DNS"`,
+/// `"IP"`, `"email"`, `"URI"`, `"DirName"`, `"OtherName"`, `"RegisteredID"`,
+/// `"X400Address"`, `"EDIPartyName"`, or `"Invalid"`); `value` is the entry's
+/// display string. Used by [`san_entries`](Cert::san_entries).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub struct GeneralNameView {
+    /// A stable short label for the general-name variant (e.g. `"DNS"`).
+    pub kind: String,
+    /// The entry's display string (e.g. `"example.com"`).
+    pub value: String,
+}
+
+/// A display-oriented view of the Subject Alternative Name extension.
+///
+/// Carries the `critical` flag and one [`GeneralNameView`] per entry, in
+/// encounter order. Returned by [`san_entries`](Cert::san_entries); the
+/// accessor yields `None` when the extension is absent. Unlike [`SanView`]
+/// (presence/emptiness only, for the lints), this enumerates every entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub struct SanEntries {
+    /// `true` if the extension is marked critical.
+    pub critical: bool,
+    /// One owned view per general name, in encounter order.
+    pub entries: Vec<GeneralNameView>,
+}
+
 impl Cert {
     /// Parses a single certificate from DER-encoded bytes.
     ///
@@ -1486,6 +1588,193 @@ impl Cert {
         Ok((not_before, not_after))
     }
 
+    /// The subject distinguished name as a human-readable RFC 4514-style string.
+    ///
+    /// Formatted by x509-parser using `oid-registry` for attribute-type names
+    /// (e.g. `CN=good.example.com, O=Example`). The order is the DN's encounter
+    /// order with attributes joined by `", "` and multi-valued RDNs joined by
+    /// `" + "`. This is the conventional x509-parser display form rather than a
+    /// byte-strict RFC 4514 serialization; it is intended for human-readable
+    /// inspection, not canonicalization. An un-formattable name degrades to an
+    /// empty string rather than erroring.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_rfc4514(&self) -> Result<String, CertError> {
+        self.with_parsed(|c| {
+            c.subject()
+                .to_string_with_registry(oid_registry())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The issuer distinguished name as a human-readable RFC 4514-style string.
+    ///
+    /// Same formatting and caveats as
+    /// [`subject_rfc4514`](Cert::subject_rfc4514), applied to the issuer DN.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn issuer_rfc4514(&self) -> Result<String, CertError> {
+        self.with_parsed(|c| {
+            c.issuer()
+                .to_string_with_registry(oid_registry())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The certificate serial number as an uppercase, colon-separated hex
+    /// string (e.g. `0A:1B:2C`).
+    ///
+    /// Derived from [`serial_der_octets`](Cert::serial_der_octets): each DER
+    /// INTEGER content octet is rendered as two uppercase hex digits, joined by
+    /// `:`. Leading sign-padding octets are preserved exactly as encoded (no
+    /// stripping). An empty serial yields the empty string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn serial_hex(&self) -> Result<String, CertError> {
+        let octets = self.serial_der_octets()?;
+        let hex: Vec<String> = octets.iter().map(|b| format!("{b:02X}")).collect();
+        Ok(hex.join(":"))
+    }
+
+    /// The certificate's outer `signatureAlgorithm` as an [`AlgorithmId`]
+    /// (dotted OID plus best-effort human-readable name).
+    ///
+    /// The OID is always present. The name is looked up in `oid-registry`; if
+    /// the registry has no name but the OID is a recognised ML-DSA / SLH-DSA
+    /// arc member with an assigned parameter set, the FIPS short name is used
+    /// instead (e.g. `SLH-DSA-SHA2-128s`). Any algorithm with no known name —
+    /// including an unassigned PQC slot — yields `name = None` and never errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn signature_algorithm(&self) -> Result<AlgorithmId, CertError> {
+        self.with_parsed(|c| {
+            let oid = &c.signature_algorithm.algorithm;
+            let dotted = oid.to_string();
+            let name = oid_name(oid).or_else(|| pqc_name_for_oid(&dotted));
+            AlgorithmId { oid: dotted, name }
+        })
+    }
+
+    /// The subject public key as a [`PublicKeyInfo`] (algorithm, optional key
+    /// size, optional curve).
+    ///
+    /// `algorithm` carries the SPKI algorithm OID plus a best-effort name
+    /// (registry name, falling back to the ML-DSA / SLH-DSA parameter-set name
+    /// for recognised PQC arc members, else `None`). `key_bits` is the RSA
+    /// modulus bit length or the EC field size when available, else `None`;
+    /// `curve` is the EC named curve, else `None`. Unknown (e.g. post-quantum)
+    /// algorithms degrade gracefully to `key_bits`/`curve` of `None` rather
+    /// than erroring.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn public_key_info(&self) -> Result<PublicKeyInfo, CertError> {
+        let curve = self.ec_named_curve()?;
+        self.with_parsed(|c| {
+            let spki = c.public_key();
+            let oid = &spki.algorithm.algorithm;
+            let dotted = oid.to_string();
+            let name = oid_name(oid).or_else(|| pqc_name_for_oid(&dotted));
+
+            // key_size() returns the RSA modulus bits / EC field size, or 0 for
+            // an algorithm the parser cannot size (e.g. PQC keys). Treat 0 as
+            // "not available" so unknown algorithms degrade to None.
+            let key_bits = match spki.parsed() {
+                Ok(parsed) => match parsed.key_size() {
+                    0 => None,
+                    bits => Some(bits),
+                },
+                Err(_) => None,
+            };
+
+            PublicKeyInfo {
+                algorithm: AlgorithmId { oid: dotted, name },
+                key_bits,
+                curve: curve
+                    .as_ref()
+                    .map(|nc| nc.name.clone().unwrap_or_else(|| nc.oid.clone())),
+            }
+        })
+    }
+
+    /// The full Key Usage bit set as a [`KeyUsageBits`], or `None` if the
+    /// extension is absent.
+    ///
+    /// Exposes all nine RFC 5280 §4.2.1.3 KeyUsage bits plus the `critical`
+    /// flag for the inspection summary, in contrast to
+    /// [`key_usage`](Cert::key_usage) which carries only the subset the lints
+    /// consume. A malformed or duplicated extension is treated as absent
+    /// (`None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn key_usage_bits(&self) -> Result<Option<KeyUsageBits>, CertError> {
+        self.with_parsed(|c| {
+            c.key_usage().ok().flatten().map(|ext| {
+                let ku = ext.value;
+                KeyUsageBits {
+                    digital_signature: ku.digital_signature(),
+                    non_repudiation: ku.non_repudiation(),
+                    key_encipherment: ku.key_encipherment(),
+                    data_encipherment: ku.data_encipherment(),
+                    key_agreement: ku.key_agreement(),
+                    key_cert_sign: ku.key_cert_sign(),
+                    crl_sign: ku.crl_sign(),
+                    encipher_only: ku.encipher_only(),
+                    decipher_only: ku.decipher_only(),
+                    critical: ext.critical,
+                }
+            })
+        })
+    }
+
+    /// The Subject Alternative Name extension as a [`SanEntries`] (one
+    /// [`GeneralNameView`] per entry, plus the `critical` flag), or `None` if
+    /// the extension is absent.
+    ///
+    /// Each general name is rendered to a stable `kind`/`value` pair for the
+    /// inspection summary. `iPAddress` entries are rendered as standard IPv4 /
+    /// IPv6 text (an octet string of any other length falls back to a raw hex
+    /// display). A malformed or duplicated extension is treated as absent
+    /// (`None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn san_entries(&self) -> Result<Option<SanEntries>, CertError> {
+        self.with_parsed(|c| {
+            c.subject_alternative_name()
+                .ok()
+                .flatten()
+                .map(|ext| SanEntries {
+                    critical: ext.critical,
+                    entries: ext
+                        .value
+                        .general_names
+                        .iter()
+                        .map(general_name_view)
+                        .collect(),
+                })
+        })
+    }
+
     /// The raw DER bytes backing this certificate.
     pub fn der_bytes(&self) -> &[u8] {
         &self.der
@@ -1496,6 +1785,62 @@ impl Cert {
 /// registry, returning `None` when the OID is unknown.
 fn oid_name(oid: &Oid<'_>) -> Option<String> {
     oid2sn(oid, oid_registry()).ok().map(str::to_owned)
+}
+
+/// A best-effort human-readable name for a dotted OID that `oid-registry` does
+/// not know but which is a recognised post-quantum (ML-DSA / SLH-DSA) arc
+/// member with an assigned parameter set.
+///
+/// Returns the FIPS short name (e.g. `SLH-DSA-SHA2-128s`) for a known parameter
+/// set, or `None` for any OID that is not a PQC arc member or whose slot is
+/// unassigned ([`PqcParamSet::Unknown`]). This lets the inspection accessors
+/// display a friendly name for PQC algorithms while never erroring on an
+/// unknown one.
+fn pqc_name_for_oid(dotted: &str) -> Option<String> {
+    match classify_pqc_oid(dotted)? {
+        PublicKeyAlg::MlDsa(PqcParamSet::Known(name))
+        | PublicKeyAlg::SlhDsa(PqcParamSet::Known(name)) => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+/// Renders a parsed [`GeneralName`] to an owned [`GeneralNameView`] with a
+/// stable `kind` label and display `value`.
+///
+/// `iPAddress` octets are rendered as standard IPv4 / IPv6 text when they are a
+/// valid 4- or 16-octet address, and as colon-separated hex otherwise.
+fn general_name_view(gn: &GeneralName<'_>) -> GeneralNameView {
+    let (kind, value) = match gn {
+        GeneralName::DNSName(s) => ("DNS", (*s).to_string()),
+        GeneralName::RFC822Name(s) => ("email", (*s).to_string()),
+        GeneralName::URI(s) => ("URI", (*s).to_string()),
+        GeneralName::IPAddress(octets) => {
+            let value = ip_from_san_octets(octets)
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| {
+                    octets
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(":")
+                });
+            ("IP", value)
+        }
+        GeneralName::DirectoryName(dn) => (
+            "DirName",
+            dn.to_string_with_registry(oid_registry())
+                .unwrap_or_default(),
+        ),
+        GeneralName::OtherName(oid, _) => ("OtherName", oid.to_string()),
+        GeneralName::RegisteredID(oid) => ("RegisteredID", oid.to_string()),
+        GeneralName::X400Address(_) => ("X400Address", "<unparsed>".to_string()),
+        GeneralName::EDIPartyName(_) => ("EDIPartyName", "<unparsed>".to_string()),
+        GeneralName::Invalid(tag, _) => ("Invalid", format!("tag={tag}")),
+    };
+    GeneralNameView {
+        kind: kind.to_string(),
+        value,
+    }
 }
 
 /// The shared NIST `2.16.840.1.101.3.4.3` "sigAlgs" arc that prefixes every
@@ -2608,6 +2953,182 @@ mod tests {
         fn read_time_rejects_non_time_tag() {
             // An INTEGER is not a Time field.
             assert!(read_time(&[0x02, 0x01, 0x00]).is_none());
+        }
+    }
+
+    mod feature08_inspection_accessors {
+        use super::*;
+
+        /// Loads the workspace `testdata/good.pem` fixture: an RSA-2048 / SHA-256
+        /// BR-compliant TLS leaf with `CN=good.example.com`, a SAN carrying one
+        /// `dNSName` (good.example.com), the serverAuth EKU, and **no** KeyUsage
+        /// extension.
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        #[test]
+        fn good_cert_subject_dn_contains_common_name() {
+            let cert = good_cert();
+
+            let subject = cert.subject_rfc4514().unwrap();
+
+            assert!(
+                subject.contains("CN=good.example.com"),
+                "subject DN should render the CN, got: {subject}"
+            );
+        }
+
+        #[test]
+        fn good_cert_issuer_dn_is_non_empty() {
+            let cert = good_cert();
+
+            let issuer = cert.issuer_rfc4514().unwrap();
+
+            assert!(!issuer.is_empty(), "issuer DN should render to a string");
+        }
+
+        #[test]
+        fn good_cert_serial_hex_is_uppercase_colon_separated() {
+            let cert = good_cert();
+
+            let hex = cert.serial_hex().unwrap();
+            let octets = cert.serial_der_octets().unwrap();
+
+            // One two-digit group per octet, joined by ':'.
+            assert_eq!(hex.split(':').count(), octets.len());
+            assert!(
+                hex.chars().all(|c| c.is_ascii_hexdigit() || c == ':'),
+                "serial hex should be hex digits and colons, got: {hex}"
+            );
+            assert!(
+                hex.chars()
+                    .filter(|c| c.is_ascii_alphabetic())
+                    .all(|c| c.is_ascii_uppercase()),
+                "serial hex letters should be uppercase, got: {hex}"
+            );
+            // Spot-check the formatting against the raw octets.
+            let expected: Vec<String> = octets.iter().map(|b| format!("{b:02X}")).collect();
+            assert_eq!(hex, expected.join(":"));
+        }
+
+        #[test]
+        fn good_cert_signature_algorithm_is_named_sha256_rsa() {
+            let cert = good_cert();
+
+            let alg = cert.signature_algorithm().unwrap();
+
+            assert_eq!(alg.oid, "1.2.840.113549.1.1.11");
+            assert_eq!(alg.name.as_deref(), Some("sha256WithRSAEncryption"));
+        }
+
+        #[test]
+        fn good_cert_public_key_info_is_rsa_2048() {
+            let cert = good_cert();
+
+            let info = cert.public_key_info().unwrap();
+
+            assert_eq!(info.algorithm.oid, "1.2.840.113549.1.1.1");
+            assert_eq!(info.key_bits, Some(2048), "RSA-2048 modulus");
+            assert!(info.curve.is_none(), "RSA key has no named curve");
+        }
+
+        #[test]
+        fn good_cert_has_no_key_usage_bits() {
+            let cert = good_cert();
+
+            // good.pem deliberately carries NO KeyUsage extension.
+            assert!(
+                cert.key_usage_bits().unwrap().is_none(),
+                "good.pem has no KeyUsage extension"
+            );
+        }
+
+        #[test]
+        fn good_cert_san_entries_carry_the_dns_name() {
+            let cert = good_cert();
+
+            let san = cert.san_entries().unwrap().unwrap();
+
+            assert_eq!(
+                san.entries,
+                vec![GeneralNameView {
+                    kind: "DNS".to_string(),
+                    value: "good.example.com".to_string(),
+                }],
+                "good.pem's SAN carries one dNSName equal to the CN"
+            );
+        }
+    }
+
+    mod pqc_name_for_oid {
+        use super::super::pqc_name_for_oid;
+
+        #[test]
+        fn known_slh_dsa_slot_resolves_to_fips_name() {
+            assert_eq!(
+                pqc_name_for_oid("2.16.840.1.101.3.4.3.20").as_deref(),
+                Some("SLH-DSA-SHA2-128s")
+            );
+        }
+
+        #[test]
+        fn known_ml_dsa_slot_resolves_to_fips_name() {
+            assert_eq!(
+                pqc_name_for_oid("2.16.840.1.101.3.4.3.18").as_deref(),
+                Some("ML-DSA-65")
+            );
+        }
+
+        #[test]
+        fn unassigned_pqc_slot_has_no_name() {
+            // .32..=.35 are reserved-but-unassigned SLH-DSA slots: no name.
+            assert!(pqc_name_for_oid("2.16.840.1.101.3.4.3.32").is_none());
+        }
+
+        #[test]
+        fn non_pqc_oid_has_no_name() {
+            assert!(pqc_name_for_oid("1.2.840.113549.1.1.1").is_none());
+        }
+    }
+
+    mod general_name_view {
+        use super::super::general_name_view;
+        use x509_parser::extensions::GeneralName;
+
+        #[test]
+        fn dns_name_renders_kind_and_value() {
+            let view = general_name_view(&GeneralName::DNSName("example.com"));
+
+            assert_eq!(view.kind, "DNS");
+            assert_eq!(view.value, "example.com");
+        }
+
+        #[test]
+        fn email_name_renders_kind_and_value() {
+            let view = general_name_view(&GeneralName::RFC822Name("a@example.com"));
+
+            assert_eq!(view.kind, "email");
+            assert_eq!(view.value, "a@example.com");
+        }
+
+        #[test]
+        fn ipv4_address_renders_dotted_quad() {
+            let view = general_name_view(&GeneralName::IPAddress(&[10, 0, 0, 1]));
+
+            assert_eq!(view.kind, "IP");
+            assert_eq!(view.value, "10.0.0.1");
+        }
+
+        #[test]
+        fn odd_length_ip_falls_back_to_hex() {
+            let view = general_name_view(&GeneralName::IPAddress(&[0x0A, 0xFF, 0x01]));
+
+            assert_eq!(view.kind, "IP");
+            assert_eq!(view.value, "0A:FF:01");
         }
     }
 

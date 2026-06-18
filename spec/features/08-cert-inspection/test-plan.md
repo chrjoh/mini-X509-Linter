@@ -38,11 +38,13 @@ Owned by developer task 01, alongside the new accessors:
 - **Lint report still present** after the summary when `--info` is set (additive, not a replacement).
 - **KeyUsage bits:** PQC CA lists exactly `Certificate Sign` + `CRL Sign`, marked not critical;
   a multi-bit case exercises the full bit mapping.
-- **SAN entries:** `DNS:SLH-DSA-SHA2-128S Root CA` plus criticality rendered.
+- **SAN entries:** `DNS:slh-dsa-test-root` plus criticality rendered.
 - **BasicConstraints:** `CA:TRUE` + critical rendered for the PQC CA.
 - **Subject/Issuer DN:** expected RFC 4514 strings.
-- **Unknown-algorithm degradation:** PQC signature/public-key algorithm shows the raw dotted OID with a
-  sensible `(unknown)` label — no crash, no empty field.
+- **PQC algorithm display:** the SLH-DSA signature/public-key algorithm shows BOTH the FIPS name and the
+  raw dotted OID — e.g. `SLH-DSA-SHA2-128s (2.16.840.1.101.3.4.3.20)` — because task 01 enriches the name
+  from the feature-13 PQC classification even though `oid-registry` does not know the OID. A genuinely
+  unknown OID still degrades to the raw OID + an `(unknown)` label (no crash, no empty field).
 - **JSON envelope:** `--info --format json` over `good.pem` parses to a single object with a `summary`
   object and a `lints` array; the `lints` array matches the feature-02 per-outcome shape verbatim;
   snapshot the `summary` object.
