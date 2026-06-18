@@ -83,10 +83,15 @@ pub struct BasicConstraintsView {
 
 /// A read-only view of the certificate's Key Usage extension.
 ///
-/// Carries only what `key_usage_present_when_ca` needs: the `keyCertSign` bit
-/// (RFC 5280 §4.2.1.3) and whether the extension is marked critical.
+/// Carries what `key_usage_present_when_ca` (the `keyCertSign` bit) and the
+/// CA/Browser Forum Code-Signing BR `cabf_cs_key_usage_required` lint (the
+/// `digitalSignature` bit) need, plus whether the extension is marked critical
+/// (RFC 5280 §4.2.1.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyUsageView {
+    /// `true` if the `digitalSignature` bit (bit 0) is asserted
+    /// (RFC 5280 §4.2.1.3).
+    pub digital_signature: bool,
     /// `true` if the `keyCertSign` bit (bit 5) is asserted.
     pub key_cert_sign: bool,
     /// `true` if the extension is marked critical.
@@ -127,6 +132,10 @@ pub struct EkuView {
     pub server_auth: bool,
     /// `true` if the `clientAuth` purpose (OID `1.3.6.1.5.5.7.3.2`) is present.
     pub client_auth: bool,
+    /// `true` if the `codeSigning` purpose (OID `1.3.6.1.5.5.7.3.3`) is present
+    /// (RFC 5280 §4.2.1.12); the defining purpose of the CA/Browser Forum
+    /// Code-Signing BR profile.
+    pub code_signing: bool,
     /// `true` if the extension carries NO key purposes at all: not `anyExtendedKeyUsage`,
     /// no recognised purpose bit, and no `other` purpose OIDs.
     ///
@@ -428,6 +437,7 @@ impl Cert {
     pub fn key_usage(&self) -> Result<Option<KeyUsageView>, CertError> {
         self.with_parsed(|c| {
             c.key_usage().ok().flatten().map(|ext| KeyUsageView {
+                digital_signature: ext.value.digital_signature(),
                 key_cert_sign: ext.value.key_cert_sign(),
                 critical: ext.critical,
             })
@@ -567,6 +577,7 @@ impl Cert {
                     critical: ext.critical,
                     server_auth: eku.server_auth,
                     client_auth: eku.client_auth,
+                    code_signing: eku.code_signing,
                     is_empty: eku_is_empty(eku),
                     oids: eku_oid_strings(eku),
                 }
@@ -605,6 +616,24 @@ impl Cert {
         Ok(self
             .extended_key_usage()?
             .is_some_and(|eku| eku.server_auth))
+    }
+
+    /// Whether the certificate asserts the `codeSigning` EKU purpose
+    /// (OID `1.3.6.1.5.5.7.3.3`).
+    ///
+    /// The defining shape predicate of the CA/Browser Forum Code-Signing BR
+    /// profile: every `cabf_cs_*` lint's `applies()` is gated on this. Returns
+    /// `false` when the EKU extension is absent (a leaf with no EKU at all does
+    /// not assert `codeSigning`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn has_code_signing(&self) -> Result<bool, CertError> {
+        Ok(self
+            .extended_key_usage()?
+            .is_some_and(|eku| eku.code_signing))
     }
 
     /// The length of the validity window in whole days
@@ -787,6 +816,64 @@ impl Cert {
                     matches!(
                         ext.parsed_extension(),
                         ParsedExtension::SubjectKeyIdentifier(_)
+                    )
+                })
+        })
+    }
+
+    /// Whether the certificate carries an Authority Information Access (AIA)
+    /// extension.
+    ///
+    /// Relied on by `cabf_cs_authority_information_access`, which expects an AIA
+    /// extension (carrying CA Issuers / OCSP pointers) on a code-signing leaf.
+    /// This is a *presence* predicate only: it does NOT enumerate the
+    /// `accessLocation` URIs (deferred to a follow-up lint). Returns `false`
+    /// when the extension is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn has_authority_info_access(&self) -> Result<bool, CertError> {
+        // OID 1.3.6.1.5.5.7.1.1 = id-pe-authorityInfoAccess (RFC 5280 §4.2.2.1).
+        let oid = Oid::from(&[1, 3, 6, 1, 5, 5, 7, 1, 1]).map_err(|_| CertError::Der)?;
+        self.with_parsed(|c| {
+            // A duplicated AIA is treated as absent rather than an error.
+            c.get_extension_unique(&oid)
+                .ok()
+                .flatten()
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.parsed_extension(),
+                        ParsedExtension::AuthorityInfoAccess(_)
+                    )
+                })
+        })
+    }
+
+    /// Whether the certificate carries a CRL Distribution Points extension.
+    ///
+    /// Relied on by `cabf_cs_crl_distribution_points`, which expects a CRL-DP
+    /// extension (a revocation pointer) on a code-signing leaf. This is a
+    /// *presence* predicate only: it does NOT enumerate the distribution-point
+    /// URIs. Returns `false` when the extension is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn has_crl_distribution_points(&self) -> Result<bool, CertError> {
+        // OID 2.5.29.31 = id-ce-cRLDistributionPoints (RFC 5280 §4.2.1.13).
+        let oid = Oid::from(&[2, 5, 29, 31]).map_err(|_| CertError::Der)?;
+        self.with_parsed(|c| {
+            // A duplicated CRL-DP is treated as absent rather than an error.
+            c.get_extension_unique(&oid)
+                .ok()
+                .flatten()
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.parsed_extension(),
+                        ParsedExtension::CRLDistributionPoints(_)
                     )
                 })
         })
@@ -1468,6 +1555,63 @@ mod tests {
             assert!(not_before.is_zulu, "notBefore ends in Z");
             assert!(not_after.is_utc_time, "notAfter is UTCTime");
             assert!(not_after.is_zulu, "notAfter ends in Z");
+        }
+    }
+
+    mod feature09_accessors {
+        use super::*;
+
+        /// Loads the workspace `testdata/good.pem` fixture: a BR-compliant TLS
+        /// leaf with serverAuth EKU (NO codeSigning), no KeyUsage extension, and
+        /// no AIA / CRL-DP extensions — the negative case for every CS accessor.
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        #[test]
+        fn good_cert_does_not_assert_code_signing() {
+            let cert = good_cert();
+
+            // good.pem asserts serverAuth, not codeSigning.
+            assert!(!cert.has_code_signing().unwrap());
+
+            // The EkuView.code_signing field agrees with the predicate.
+            let eku = cert.extended_key_usage().unwrap().unwrap();
+            assert!(!eku.code_signing, "good.pem EKU has no codeSigning purpose");
+            assert!(eku.server_auth, "good.pem EKU asserts serverAuth");
+            assert!(
+                !eku.oids.contains(&"1.3.6.1.5.5.7.3.3".to_string()),
+                "codeSigning OID absent from EKU oids"
+            );
+        }
+
+        #[test]
+        fn good_cert_has_no_authority_info_access() {
+            let cert = good_cert();
+
+            assert!(!cert.has_authority_info_access().unwrap());
+        }
+
+        #[test]
+        fn good_cert_has_no_crl_distribution_points() {
+            let cert = good_cert();
+
+            assert!(!cert.has_crl_distribution_points().unwrap());
+        }
+
+        #[test]
+        fn good_cert_has_no_key_usage_so_no_digital_signature_view() {
+            let cert = good_cert();
+
+            // good.pem carries no KeyUsage extension, so there is no view at all;
+            // a code-signing leaf would expose `digital_signature == true` here.
+            assert!(
+                cert.key_usage().unwrap().is_none(),
+                "good.pem has no KeyUsage extension"
+            );
         }
     }
 

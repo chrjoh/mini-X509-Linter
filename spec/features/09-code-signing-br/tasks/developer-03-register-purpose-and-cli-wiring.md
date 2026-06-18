@@ -2,7 +2,7 @@
 agent: developer
 seq: 3
 title: Register cabf_cs lints, add CertPurpose::CodeSigning, wire CLI --source/--purpose/output
-status: pending
+status: done
 touches:
   - crates/linter/src/registry.rs
   - crates/cli/src/main.rs

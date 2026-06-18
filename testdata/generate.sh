@@ -239,8 +239,18 @@ HYG_RSA2048_KEY="$(mktemp)"
 HYG_RSA1024_KEY="$(mktemp)"
 HYG_EC_KEY="$(mktemp)"
 
+# Code-signing keys (feature 09). One RSA-3072 key is shared across the six
+# RSA-3072 CS fixtures (their SubjectKeyIdentifier is therefore identical, which
+# is fine — the CS lints do not assert SKI uniqueness across fixtures). A
+# separate RSA-2048 key drives cabf_cs_rsa_2048, and an EXPLICIT-curve EC key
+# (P-256 params encoded inline, no named-curve OID) drives the bad-curve fixture.
+CS_RSA3072_KEY="$(mktemp)"
+CS_RSA2048_KEY="$(mktemp)"
+CS_EC_KEY="$(mktemp)"
+
 cleanup() {
-  rm -f "$KEY" "$HYG_RSA2048_KEY" "$HYG_RSA1024_KEY" "$HYG_EC_KEY" "${EXT_TMPS[@]}"
+  rm -f "$KEY" "$HYG_RSA2048_KEY" "$HYG_RSA1024_KEY" "$HYG_EC_KEY" \
+    "$CS_RSA3072_KEY" "$CS_RSA2048_KEY" "$CS_EC_KEY" "${EXT_TMPS[@]}"
 }
 trap cleanup EXIT
 
@@ -722,3 +732,144 @@ EXT_COUNTRY_ISO="$(new_ext)"
 make_leaf_ext "$EXT_COUNTRY_ISO" "DNS:country-iso.example.com"
 sign_csr "$HERE/cabf_br_country_not_iso.pem" "/C=ZZ/CN=country-iso.example.com" 77 \
   "$BR_OK_NB" "$BR_OK_NA" "$EXT_COUNTRY_ISO"
+
+# ===========================================================================
+# ⚠️  Feature 09: CA/Browser Forum CODE-SIGNING Baseline Requirements fixtures
+# ===========================================================================
+# ⚠️  TIME-FRAGILITY — READ ME — these fixtures EXPIRE ~2027-06-01.  ⚠️
+# ---------------------------------------------------------------------------
+# The eight cabf_cs_*.pem fixtures use currently-valid windows so that
+# hygiene_not_expired stays quiet (notAfter in the future). The non-validity
+# fixtures use the CS_OK window 2026-06-01 -> 2027-06-01 (365d, <=460d). The two
+# validity-violating fixtures straddle "now":
+#     cabf_cs_validity_40_months  2024-06-01 -> 2027-10-01  (~40 months, >1188d)
+#     cabf_cs_validity_500_days   2026-02-01 -> 2027-06-16  (500d, >460d, <=39mo)
+# ALL of them EXPIRE in 2027. After 2027-06-01 (and 2027-10-01 for the 40-month
+# fixture) hygiene_not_expired fires on the CS fixtures and the cabf_cs isolation
+# tests (crates/linter/tests/cabf_cs.rs) break wholesale.
+#
+#   >>> REGENERATE ANNUALLY (slide the CS windows forward) BEFORE 2027-06-01. <<<
+#
+# Scoping note: the CS lints are NARROW (codeSigning-EKU-gated). Every CS leaf
+# carries extendedKeyUsage=codeSigning, keyUsage=digitalSignature (critical),
+# CA:FALSE, a hash SubjectKeyIdentifier, a non-empty CN, and NO SAN. They
+# deliberately do NOT carry serverAuth, so under the raw registry the broad
+# cabf_br_ext_key_usage_server_auth_present co-fires — that is the false positive
+# `--purpose code-signing` suppresses, not a fixture defect (see cabf_cs.rs).
+#
+# Each fixture is otherwise CS-compliant EXCEPT its one target violation. Default
+# key RSA-3072 / SHA-256. AIA = OCSP + CA Issuers; CRL-DP = one HTTP URI.
+
+# Fresh keys for the CS section.
+openssl genrsa -out "$CS_RSA3072_KEY" 3072 2>/dev/null
+openssl genrsa -out "$CS_RSA2048_KEY" 2048 2>/dev/null
+# Explicit (non-named) curve params so ec_named_curve() returns None: encode the
+# P-256 parameters inline rather than by curve OID.
+openssl ecparam -name prime256v1 -param_enc explicit -genkey -noout \
+  -out "$CS_EC_KEY" 2>/dev/null
+
+# make_cs_ext <out_extfile> <aia:0|1> <crl:0|1> [ku_override]
+#
+# Writes a code-signing leaf extension config: CA:FALSE, codeSigning EKU, a hash
+# SubjectKeyIdentifier, and keyUsage=critical,digitalSignature (overridable via
+# $4). NO SAN. AIA (OCSP + CA Issuers) and CRL-DP are each emitted only when the
+# corresponding flag is 1.
+make_cs_ext() {
+  local out="$1" want_aia="$2" want_crl="$3" ku="${4:-critical,digitalSignature}"
+  {
+    printf 'basicConstraints=CA:FALSE\n'
+    printf 'extendedKeyUsage=codeSigning\n'
+    printf 'keyUsage=%s\n' "$ku"
+    printf 'subjectKeyIdentifier=hash\n'
+    if [[ "$want_aia" == "1" ]]; then
+      printf 'authorityInfoAccess=OCSP;URI:http://ocsp.example.com,caIssuers;URI:http://ca.example.com/ca.crt\n'
+    fi
+    if [[ "$want_crl" == "1" ]]; then
+      printf 'crlDistributionPoints=URI:http://crl.example.com/cs.crl\n'
+    fi
+  } >"$out"
+}
+
+# sign_cs <out.pem> <key> <subject> <serial> <not_before> <not_after> <extfile>
+#
+# Self-signs a CS CSR built from the given key with SHA-256.
+sign_cs() {
+  local out="$1" key="$2" subj="$3" serial="$4" nb="$5" na="$6" extfile="$7"
+  local csr
+  csr="$(mktemp)"
+  openssl req -new -key "$key" -subj "$subj" -out "$csr" 2>/dev/null
+  openssl x509 -req -in "$csr" -signkey "$key" -out "$out" \
+    -set_serial "$serial" -not_before "$nb" -not_after "$na" -sha256 \
+    -extfile "$extfile" 2>/dev/null
+  rm -f "$csr"
+  echo "wrote $out"
+}
+
+# CS_OK: currently valid AND <=460d (365d). Used by every CS fixture whose target
+# violation is NOT validity. EXPIRES 2027-06-01 — see the warning above.
+CS_OK_NB="20260601000000Z"
+CS_OK_NA="20270601000000Z"
+
+# CS_40M: ~40-month window (>1188d) straddling now. notAfter in the future so
+# not_expired stays quiet; only the CS validity-period lint fires.
+CS_40M_NB="20240601000000Z"
+CS_40M_NA="20271001000000Z"
+
+# CS_500D: 500-day window (>460d, <=39 months) straddling now.
+CS_500D_NB="20260201000000Z"
+CS_500D_NA="20270616000000Z"
+
+# cabf_cs_good: clean CS leaf — RSA-3072, critical digitalSignature KU, AIA +
+# CRL-DP present, CS_OK window. Passes every CS lint.
+EXT_CS_GOOD="$(new_ext)"
+make_cs_ext "$EXT_CS_GOOD" 1 1
+sign_cs "$HERE/cabf_cs_good.pem" "$CS_RSA3072_KEY" "/CN=cs-good.example.com" 90 \
+  "$CS_OK_NB" "$CS_OK_NA" "$EXT_CS_GOOD"
+
+# cabf_cs_missing_key_usage: KU asserts only keyEncipherment (NO digitalSignature)
+# — violates the CS digitalSignature-required rule. Everything else CS-compliant.
+EXT_CS_NOKU="$(new_ext)"
+make_cs_ext "$EXT_CS_NOKU" 1 1 "critical,keyEncipherment"
+sign_cs "$HERE/cabf_cs_missing_key_usage.pem" "$CS_RSA3072_KEY" \
+  "/CN=cs-no-ku.example.com" 91 "$CS_OK_NB" "$CS_OK_NA" "$EXT_CS_NOKU"
+
+# cabf_cs_rsa_2048: RSA-2048 key (< the CS 3072-bit minimum). Otherwise clean.
+EXT_CS_RSA2048="$(new_ext)"
+make_cs_ext "$EXT_CS_RSA2048" 1 1
+sign_cs "$HERE/cabf_cs_rsa_2048.pem" "$CS_RSA2048_KEY" \
+  "/CN=cs-rsa-2048.example.com" 92 "$CS_OK_NB" "$CS_OK_NA" "$EXT_CS_RSA2048"
+
+# cabf_cs_ecdsa_bad_curve: EC P-256 key with EXPLICIT (non-named) params, so
+# ec_named_curve() returns None and the CS curve-allowlist lint fires. Otherwise
+# clean (AIA + CRL-DP, CS_OK window).
+EXT_CS_EC="$(new_ext)"
+make_cs_ext "$EXT_CS_EC" 1 1
+sign_cs "$HERE/cabf_cs_ecdsa_bad_curve.pem" "$CS_EC_KEY" \
+  "/CN=cs-ec-explicit.example.com" 93 "$CS_OK_NB" "$CS_OK_NA" "$EXT_CS_EC"
+
+# cabf_cs_validity_40_months: ~40-month window straddling now (>1188d). Violates
+# ONLY the CS validity-period lint.
+EXT_CS_40M="$(new_ext)"
+make_cs_ext "$EXT_CS_40M" 1 1
+sign_cs "$HERE/cabf_cs_validity_40_months.pem" "$CS_RSA3072_KEY" \
+  "/CN=cs-validity-40m.example.com" 94 "$CS_40M_NB" "$CS_40M_NA" "$EXT_CS_40M"
+
+# cabf_cs_validity_500_days: 500-day window straddling now (>460d, <=39 months).
+EXT_CS_500D="$(new_ext)"
+make_cs_ext "$EXT_CS_500D" 1 1
+sign_cs "$HERE/cabf_cs_validity_500_days.pem" "$CS_RSA3072_KEY" \
+  "/CN=cs-validity-500d.example.com" 95 "$CS_500D_NB" "$CS_500D_NA" "$EXT_CS_500D"
+
+# cabf_cs_no_aia: clean CS leaf with NO AIA (CRL-DP kept). Violates ONLY the CS
+# AIA-required lint.
+EXT_CS_NOAIA="$(new_ext)"
+make_cs_ext "$EXT_CS_NOAIA" 0 1
+sign_cs "$HERE/cabf_cs_no_aia.pem" "$CS_RSA3072_KEY" \
+  "/CN=cs-no-aia.example.com" 96 "$CS_OK_NB" "$CS_OK_NA" "$EXT_CS_NOAIA"
+
+# cabf_cs_no_crl: clean CS leaf with NO CRL-DP (AIA kept). Violates ONLY the CS
+# CRL-DP-required lint.
+EXT_CS_NOCRL="$(new_ext)"
+make_cs_ext "$EXT_CS_NOCRL" 1 0
+sign_cs "$HERE/cabf_cs_no_crl.pem" "$CS_RSA3072_KEY" \
+  "/CN=cs-no-crl.example.com" 97 "$CS_OK_NB" "$CS_OK_NA" "$EXT_CS_NOCRL"

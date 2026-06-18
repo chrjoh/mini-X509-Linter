@@ -181,7 +181,7 @@ clean and asserting `codeSigning` (so the gate engages).
 
 | Fixture | shape | single intended violation |
 |---|---|---|
-| `cabf_cs_good.pem` | codeSigning + digitalSignature + RSA-3072/SHA-256 + ≤460d currently-valid + CA:FALSE | NONE (clean; passes the whole 22-lint registry) |
+| `cabf_cs_good.pem` | codeSigning + digitalSignature + RSA-3072/SHA-256 + ≤460d currently-valid + CA:FALSE | NONE in the cabf_cs set (clean under the code-signing purpose; a raw all-source run additionally trips the broad cabf_br serverAuth lint — the false positive `--purpose` suppresses) |
 | `cabf_cs_missing_key_usage.pem` | codeSigning EKU, NO digitalSignature KU (e.g. KU with only `keyEncipherment`, or no KU) | `cabf_cs_key_usage_required` |
 | `cabf_cs_rsa_2048.pem` | codeSigning, RSA-2048 (≥ hygiene's 2048 so hygiene passes; < CS's 3072) | `cabf_cs_rsa_key_size` |
 | `cabf_cs_ecdsa_bad_curve.pem` | codeSigning, EC on a non-allowlisted-but-hygiene-permitted curve, OR P-256 with explicit (non-named) params | `cabf_cs_ecdsa_curve_params` |

@@ -2,7 +2,7 @@
 agent: tester
 seq: 4
 title: Code-signing fixtures + cabf_cs integration tests + CLI e2e
-status: pending
+status: done
 touches:
   - testdata/generate.sh
   - testdata/cabf_cs_good.pem
@@ -59,7 +59,7 @@ existing fixture.
   `CS_OK_NA="20270601000000Z"` (365d).
 - Generate the fixtures (see plan.md Fixtures table):
   - `cabf_cs_good.pem` — codeSigning + digitalSignature + RSA-3072/SHA-256 + CS_OK window + CA:FALSE +
-    AIA + CRL-DP present. Clean; passes the full 22-lint registry.
+    AIA + CRL-DP present. Clean across the cabf_cs set (clean under the code-signing purpose).
   - `cabf_cs_missing_key_usage.pem` — codeSigning, NO digitalSignature KU (e.g. only keyEncipherment).
   - `cabf_cs_rsa_2048.pem` — codeSigning, RSA-2048 (passes hygiene's ≥2048, fails CS's ≥3072).
   - `cabf_cs_ecdsa_bad_curve.pem` — codeSigning, EC with non-named (explicit) params OR a
@@ -102,7 +102,7 @@ existing fixture.
 
 - [ ] 8 new openssl-generated CS fixtures added; NO existing fixture modified; `generate.sh` carries
       the time-fragility header note and the CS leaf-extension config.
-- [ ] `cabf_cs_good.pem` passes the full 22-lint registry; each violating fixture isolates exactly its
+- [ ] `cabf_cs_good.pem` passes the cabf_cs set (clean under the code-signing purpose); each violating fixture isolates exactly its
       one CS rule (with the documented 40-month/460-day co-fire exception).
 - [ ] `cabf_cs.rs` covers per-lint flag/pass, the direct-call `eku_required` path, scoping
       (NotApplicable on non-codeSigning / Applies on codeSigning), and the no-cascade assertion.

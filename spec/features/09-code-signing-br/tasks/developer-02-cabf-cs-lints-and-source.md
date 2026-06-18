@@ -2,7 +2,7 @@
 agent: developer
 seq: 2
 title: Add RuleSource::CabfCs and implement the 8 codeSigning-gated cabf_cs lints
-status: pending
+status: done
 touches:
   - crates/linter/src/source.rs
   - crates/linter/src/lints/mod.rs

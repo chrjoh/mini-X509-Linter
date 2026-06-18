@@ -19,8 +19,12 @@ use linter::{Applicability, Finding, LintOutcome, RuleSource, Severity};
 ///
 /// Listing the sources explicitly (rather than deriving order from the input)
 /// keeps text output stable regardless of registry ordering.
-const SOURCE_ORDER: [RuleSource; 3] =
-    [RuleSource::Rfc5280, RuleSource::CabfBr, RuleSource::Hygiene];
+const SOURCE_ORDER: [RuleSource; 4] = [
+    RuleSource::Rfc5280,
+    RuleSource::CabfBr,
+    RuleSource::CabfCs,
+    RuleSource::Hygiene,
+];
 
 /// Controls how passing / not-applicable lints are rendered in text output.
 ///
@@ -150,6 +154,7 @@ fn source_label(source: RuleSource) -> &'static str {
     match source {
         RuleSource::Rfc5280 => "rfc5280",
         RuleSource::CabfBr => "cabf_br",
+        RuleSource::CabfCs => "cabf_cs",
         RuleSource::Hygiene => "hygiene",
     }
 }

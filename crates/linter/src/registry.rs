@@ -116,27 +116,34 @@ impl Default for Registry {
 ///
 /// # Future variants
 ///
-/// `Client`, `Smime`, and `CodeSigning` are planned but **not yet implemented**.
-/// Until dedicated rule sets exist for them they would resolve to the same set
-/// as [`Generic`](CertPurpose::Generic) (RFC 5280 + Hygiene, skipping
-/// `CabfBr`). They are documented here so that adding them later is purely
-/// additive — no rename of the three shipped variants is required.
+/// `Client` and `Smime` are planned but **not yet implemented**. Until dedicated
+/// rule sets exist for them they would resolve to the same set as
+/// [`Generic`](CertPurpose::Generic) (RFC 5280 + Hygiene, skipping `CabfBr` and
+/// `CabfCs`). They are documented here so that adding them later is purely
+/// additive — no rename of the shipped variants is required.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertPurpose {
-    /// Resolve the purpose per certificate from a heuristic: if the leaf asserts
-    /// the serverAuth EKU it is treated as [`TlsServer`](CertPurpose::TlsServer),
-    /// otherwise as [`Generic`](CertPurpose::Generic). See
+    /// Resolve the purpose per certificate from a heuristic on the leaf's EKU,
+    /// consulted once with a fixed precedence: if the leaf asserts the
+    /// codeSigning EKU it is treated as [`CodeSigning`](CertPurpose::CodeSigning);
+    /// else if it asserts the serverAuth EKU it is treated as
+    /// [`TlsServer`](CertPurpose::TlsServer); otherwise as
+    /// [`Generic`](CertPurpose::Generic). See
     /// [`allowed_sources`](CertPurpose::allowed_sources) for the fail-closed
     /// behaviour on a parse error.
     Auto,
-    /// A publicly-trusted TLS server certificate: all current sources apply,
-    /// including the TLS-server-specific [`RuleSource::CabfBr`] set. Forcing this
+    /// A publicly-trusted TLS server certificate: the standard, hygiene, and
+    /// TLS-server-specific [`RuleSource::CabfBr`] sets apply. Forcing this
     /// purpose runs `CabfBr` even when the serverAuth EKU is absent.
     TlsServer,
-    /// A certificate with no TLS-server profile: only the
+    /// A code-signing certificate: the standard, hygiene, and code-signing
+    /// [`RuleSource::CabfCs`] sets apply. Forcing this purpose runs `CabfCs` even
+    /// when the codeSigning EKU is absent.
+    CodeSigning,
+    /// A certificate with no TLS-server or code-signing profile: only the
     /// standard-and-hygiene sources apply ([`RuleSource::Rfc5280`] and
-    /// [`RuleSource::Hygiene`]); the TLS-server-specific [`RuleSource::CabfBr`]
-    /// set is skipped.
+    /// [`RuleSource::Hygiene`]); the profile-specific [`RuleSource::CabfBr`] /
+    /// [`RuleSource::CabfCs`] sets are skipped.
     Generic,
 }
 
@@ -159,20 +166,62 @@ fn generic_sources() -> Vec<RuleSource> {
     vec![RuleSource::Rfc5280, RuleSource::Hygiene]
 }
 
-/// Maps the result of [`Cert::has_server_auth`] to an allowed-source set.
+/// The allowed-source set for a code-signing certificate: standard, hygiene, and
+/// the code-signing-specific [`RuleSource::CabfCs`].
 ///
-/// This is the pure decision behind [`CertPurpose::Auto`], factored out so the
-/// `Ok(false)` and `Err(..)` branches are unit-testable without a fixture:
+/// Both [`CertPurpose::CodeSigning`] and an `Auto` purpose that resolves to
+/// code-signing return this exact set, so the two paths stay in sync. Ordering
+/// is fixed (`Rfc5280, Hygiene, CabfCs`) for deterministic downstream output.
+fn code_signing_sources() -> Vec<RuleSource> {
+    vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfCs]
+}
+
+/// The concrete purpose [`CertPurpose::Auto`] resolves to for a leaf, given its
+/// codeSigning / serverAuth EKU reads.
 ///
-/// - `Ok(true)`  → [`tls_server_sources`] (includes `CabfBr`).
-/// - `Ok(false)` → [`generic_sources`] (skips `CabfBr`).
-/// - `Err(..)`   → [`generic_sources`] — **fail closed**: a defensive parse
-///   failure must never manufacture a Baseline Requirements false positive, so
-///   the TLS-server-specific source is dropped.
-fn auto_sources_from(has_server_auth: Result<bool, crate::cert::CertError>) -> Vec<RuleSource> {
-    match has_server_auth {
-        Ok(true) => tls_server_sources(),
-        Ok(false) | Err(_) => generic_sources(),
+/// This is the pure decision behind `Auto`, factored out so every branch
+/// (including the fail-closed error paths) is unit-testable without a fixture.
+/// The EKU precedence is fixed:
+///
+/// 1. `code_signing == Ok(true)` → [`CertPurpose::CodeSigning`] — checked
+///    **first**, so a leaf that (unusually) asserts both EKUs is treated as
+///    code-signing.
+/// 2. else `server_auth == Ok(true)` → [`CertPurpose::TlsServer`].
+/// 3. else → [`CertPurpose::Generic`].
+///
+/// **Fail closed:** an `Err(..)` reading either EKU is treated as "absent" for
+/// that purpose, so a defensive parse failure can never manufacture a Baseline
+/// Requirements or Code-Signing false positive — the worst case falls through to
+/// [`CertPurpose::Generic`].
+fn auto_purpose_from(
+    has_code_signing: Result<bool, crate::cert::CertError>,
+    has_server_auth: Result<bool, crate::cert::CertError>,
+) -> CertPurpose {
+    if matches!(has_code_signing, Ok(true)) {
+        CertPurpose::CodeSigning
+    } else if matches!(has_server_auth, Ok(true)) {
+        CertPurpose::TlsServer
+    } else {
+        CertPurpose::Generic
+    }
+}
+
+/// Maps the auto-resolved concrete purpose to its allowed-source set.
+///
+/// This is the pure decision behind [`CertPurpose::Auto::allowed_sources`],
+/// factored out so it is unit-testable without a fixture. It mirrors
+/// [`auto_purpose_from`] and returns the same set the resolved concrete purpose
+/// would return.
+fn auto_sources_from(
+    has_code_signing: Result<bool, crate::cert::CertError>,
+    has_server_auth: Result<bool, crate::cert::CertError>,
+) -> Vec<RuleSource> {
+    match auto_purpose_from(has_code_signing, has_server_auth) {
+        CertPurpose::CodeSigning => code_signing_sources(),
+        CertPurpose::TlsServer => tls_server_sources(),
+        // `Generic` is the only other reachable value; `Auto` never resolves to
+        // `Auto`.
+        _ => generic_sources(),
     }
 }
 
@@ -185,33 +234,40 @@ impl CertPurpose {
     /// `--source` selection and passes the result to [`Registry::run_filtered`].
     ///
     /// - [`TlsServer`](CertPurpose::TlsServer) → `[Rfc5280, Hygiene, CabfBr]`.
+    /// - [`CodeSigning`](CertPurpose::CodeSigning) → `[Rfc5280, Hygiene, CabfCs]`.
     /// - [`Generic`](CertPurpose::Generic) → `[Rfc5280, Hygiene]`.
-    /// - [`Auto`](CertPurpose::Auto) → resolved per cert via
-    ///   [`Cert::has_server_auth`]: `Ok(true)` yields the tls-server set,
-    ///   `Ok(false)` the generic set, and `Err(..)` **fails closed** to the
-    ///   generic set (skipping `CabfBr`) so a defensive parse failure cannot
-    ///   manufacture a Baseline Requirements false positive. This resolver never
-    ///   panics and never propagates the error.
+    /// - [`Auto`](CertPurpose::Auto) → resolved per cert from its EKU with a
+    ///   fixed precedence (codeSigning first, then serverAuth, else generic):
+    ///   codeSigning yields the code-signing set, serverAuth the tls-server set,
+    ///   neither the generic set, and an `Err(..)` reading either EKU **fails
+    ///   closed** (skipping `CabfCs` / `CabfBr`) so a defensive parse failure
+    ///   cannot manufacture a Code-Signing or Baseline Requirements false
+    ///   positive. This resolver never panics and never propagates the error.
     ///
-    /// `Auto` is a documented **heuristic**: a leaf with no EKU, or one that does
-    /// not assert serverAuth, resolves to `generic`. Forcing
-    /// [`TlsServer`](CertPurpose::TlsServer) runs the `CabfBr` set even when the
-    /// serverAuth EKU is absent.
+    /// `Auto` is a documented **heuristic**: codeSigning is checked before
+    /// serverAuth, so a leaf asserting both is treated as code-signing; a leaf
+    /// with no EKU resolves to `generic`. Forcing
+    /// [`TlsServer`](CertPurpose::TlsServer) / [`CodeSigning`](CertPurpose::CodeSigning)
+    /// runs the respective profile set even when its EKU is absent.
     pub fn allowed_sources(self, cert: &Cert) -> Vec<RuleSource> {
         match self {
             CertPurpose::TlsServer => tls_server_sources(),
+            CertPurpose::CodeSigning => code_signing_sources(),
             CertPurpose::Generic => generic_sources(),
-            CertPurpose::Auto => auto_sources_from(cert.has_server_auth()),
+            CertPurpose::Auto => auto_sources_from(cert.has_code_signing(), cert.has_server_auth()),
         }
     }
 
     /// Resolves this purpose to a concrete, non-`Auto` purpose for `cert`.
     ///
-    /// [`TlsServer`](CertPurpose::TlsServer) and [`Generic`](CertPurpose::Generic)
-    /// resolve to themselves. [`Auto`](CertPurpose::Auto) resolves to
-    /// [`TlsServer`](CertPurpose::TlsServer) when the leaf asserts serverAuth and
-    /// to [`Generic`](CertPurpose::Generic) otherwise — including the fail-closed
-    /// `Err(..)` path, matching [`allowed_sources`](CertPurpose::allowed_sources).
+    /// [`TlsServer`](CertPurpose::TlsServer),
+    /// [`CodeSigning`](CertPurpose::CodeSigning), and
+    /// [`Generic`](CertPurpose::Generic) resolve to themselves.
+    /// [`Auto`](CertPurpose::Auto) resolves per the fixed EKU precedence
+    /// (codeSigning → [`CodeSigning`](CertPurpose::CodeSigning); else serverAuth →
+    /// [`TlsServer`](CertPurpose::TlsServer); else
+    /// [`Generic`](CertPurpose::Generic)), including the fail-closed `Err(..)`
+    /// path, matching [`allowed_sources`](CertPurpose::allowed_sources).
     ///
     /// The CLI uses this for the verbose `purpose:` header (for example
     /// `purpose: generic (auto)`), reporting which concrete purpose `auto`
@@ -221,11 +277,9 @@ impl CertPurpose {
     pub fn resolve(self, cert: &Cert) -> CertPurpose {
         match self {
             CertPurpose::TlsServer => CertPurpose::TlsServer,
+            CertPurpose::CodeSigning => CertPurpose::CodeSigning,
             CertPurpose::Generic => CertPurpose::Generic,
-            CertPurpose::Auto => match cert.has_server_auth() {
-                Ok(true) => CertPurpose::TlsServer,
-                Ok(false) | Err(_) => CertPurpose::Generic,
-            },
+            CertPurpose::Auto => auto_purpose_from(cert.has_code_signing(), cert.has_server_auth()),
         }
     }
 }
@@ -257,6 +311,7 @@ fn evaluate(lint: &dyn Lint, cert: &Cert) -> LintOutcome {
 /// their lints here.
 pub fn default_registry() -> Registry {
     use crate::lints::cabf_br;
+    use crate::lints::cabf_cs;
     use crate::lints::hygiene;
     use crate::lints::rfc5280;
 
@@ -308,6 +363,19 @@ pub fn default_registry() -> Registry {
         Box::new(cabf_br::SubjectContainsReservedIp::new()),
         Box::new(cabf_br::ExtraSubjectCommonNames::new()),
         Box::new(cabf_br::SubjectCountryNotIso::new()),
+        // CA/Browser Forum Code-Signing Baseline Requirements lints (feature 09).
+        // Appended after the cabf_br block; order matches the plan's lint table
+        // and is deterministic — it matters for the feature 06 golden test, so
+        // keep it stable. All eight are codeSigning-EKU-gated (NotApplicable on
+        // every non-codeSigning leaf).
+        Box::new(cabf_cs::EkuRequired::new()),
+        Box::new(cabf_cs::KeyUsageRequired::new()),
+        Box::new(cabf_cs::RsaKeySize::new()),
+        Box::new(cabf_cs::EcdsaCurveParams::new()),
+        Box::new(cabf_cs::ValidityPeriodLongerThan39Months::new()),
+        Box::new(cabf_cs::ValidityPeriodLongerThan460Days::new()),
+        Box::new(cabf_cs::AuthorityInformationAccess::new()),
+        Box::new(cabf_cs::CrlDistributionPoints::new()),
     ])
 }
 
@@ -633,15 +701,16 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             let cert = sample_cert();
             let outcomes = registry.run(&cert);
 
-            // Expect: the four hygiene lints, all sixteen RFC 5280 lints, and
-            // the twelve CA/Browser Forum BR lints are wired in and reported —
-            // one outcome per registered lint. `sample_cert()` is a CA, so the
-            // BR lints and leaf-only rfc5280 lints are `NotApplicable` but still
-            // produce one outcome each, keeping the outcome count equal to the
-            // registry length.
+            // Expect: the four hygiene lints, all sixteen RFC 5280 lints, the
+            // twelve CA/Browser Forum BR lints, and the eight CA/Browser Forum
+            // Code-Signing lints are wired in and reported — one outcome per
+            // registered lint. `sample_cert()` is a self-signed CA with no
+            // codeSigning EKU, so the BR/CS lints and leaf-only rfc5280 lints are
+            // `NotApplicable` but still produce one outcome each, keeping the
+            // outcome count equal to the registry length.
             assert!(!registry.is_empty());
-            assert_eq!(registry.len(), 32);
-            assert_eq!(outcomes.len(), 32);
+            assert_eq!(registry.len(), 40);
+            assert_eq!(outcomes.len(), 40);
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
             for expected in [
@@ -677,6 +746,14 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "cabf_br_subject_contains_reserved_ip",
                 "cabf_br_extra_subject_common_names",
                 "cabf_br_subject_country_not_iso",
+                "cabf_cs_eku_required",
+                "cabf_cs_key_usage_required",
+                "cabf_cs_rsa_key_size",
+                "cabf_cs_ecdsa_curve_params",
+                "cabf_cs_validity_period_longer_than_39_months",
+                "cabf_cs_validity_period_longer_than_460_days",
+                "cabf_cs_authority_information_access",
+                "cabf_cs_crl_distribution_points",
             ] {
                 assert!(
                     ids.contains(&expected),
@@ -794,6 +871,42 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
         }
 
         #[test]
+        fn cabf_cs_source_filter_runs_exactly_the_cabf_cs_set() {
+            // Setup & Invoke: filtering by RuleSource::CabfCs must select the
+            // eight Code-Signing lints and nothing else (no RFC 5280, hygiene, or
+            // cabf_br lints). Filtering is by source, before applicability, so the
+            // CS lints appear even though `sample_cert()` has no codeSigning EKU
+            // (they are NotApplicable but still emitted as outcomes).
+            let registry = default_registry();
+            let cert = sample_cert();
+            let outcomes = registry.run_filtered(&cert, &[RuleSource::CabfCs]);
+
+            // Expect
+            assert_eq!(outcomes.len(), 8);
+            assert!(outcomes.iter().all(|o| o.source == RuleSource::CabfCs));
+
+            let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
+            for expected in [
+                "cabf_cs_eku_required",
+                "cabf_cs_key_usage_required",
+                "cabf_cs_rsa_key_size",
+                "cabf_cs_ecdsa_curve_params",
+                "cabf_cs_validity_period_longer_than_39_months",
+                "cabf_cs_validity_period_longer_than_460_days",
+                "cabf_cs_authority_information_access",
+                "cabf_cs_crl_distribution_points",
+            ] {
+                assert!(
+                    ids.contains(&expected),
+                    "cabf_cs filter missing lint {expected}; got {ids:?}"
+                );
+            }
+            assert!(!ids.iter().any(|id| id.starts_with("rfc5280_")));
+            assert!(!ids.iter().any(|id| id.starts_with("hygiene_")));
+            assert!(!ids.iter().any(|id| id.starts_with("cabf_br_")));
+        }
+
+        #[test]
         fn default_trait_matches_default_registry() {
             assert_eq!(Registry::default().len(), default_registry().len());
         }
@@ -863,23 +976,106 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
 
         #[test]
         fn auto_on_non_server_auth_resolves_to_generic_set() {
-            // The pure decision: Ok(false) (a leaf without serverAuth) drops
-            // CabfBr. Tested via the helper so no non-serverAuth fixture is
-            // required (task 04 adds one later).
-            let sources = auto_sources_from(Ok(false));
+            // The pure decision: a leaf without codeSigning and without
+            // serverAuth drops both CabfBr and CabfCs. Tested via the helper so no
+            // fixture is required (task 04 adds one later).
+            let sources = auto_sources_from(Ok(false), Ok(false));
 
             assert_eq!(sources, vec![RuleSource::Rfc5280, RuleSource::Hygiene]);
             assert!(!sources.contains(&RuleSource::CabfBr));
+            assert!(!sources.contains(&RuleSource::CabfCs));
         }
 
         #[test]
         fn auto_fails_closed_to_generic_on_error() {
-            // The fail-closed decision: Err(..) must drop CabfBr so a defensive
-            // parse failure cannot manufacture a BR false positive.
-            let sources = auto_sources_from(Err(CertError::Der));
+            // The fail-closed decision: Err(..) reading either EKU must drop both
+            // CabfBr and CabfCs so a defensive parse failure cannot manufacture a
+            // BR or CS false positive.
+            let sources = auto_sources_from(Err(CertError::Der), Err(CertError::Der));
 
             assert_eq!(sources, vec![RuleSource::Rfc5280, RuleSource::Hygiene]);
             assert!(!sources.contains(&RuleSource::CabfBr));
+            assert!(!sources.contains(&RuleSource::CabfCs));
+        }
+
+        #[test]
+        fn code_signing_includes_cabf_cs() {
+            // Setup
+            let cert = sample_cert();
+
+            // Invoke
+            let sources = CertPurpose::CodeSigning.allowed_sources(&cert);
+
+            // Expect: standard + hygiene + CabfCs, stable order, no CabfBr.
+            assert_eq!(
+                sources,
+                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfCs]
+            );
+            assert!(sources.contains(&RuleSource::CabfCs));
+            assert!(!sources.contains(&RuleSource::CabfBr));
+        }
+
+        #[test]
+        fn code_signing_resolves_to_itself() {
+            let cert = sample_cert();
+            assert_eq!(
+                CertPurpose::CodeSigning.resolve(&cert),
+                CertPurpose::CodeSigning
+            );
+        }
+
+        #[test]
+        fn auto_on_code_signing_leaf_includes_cabf_cs() {
+            // The pure decision: a codeSigning leaf yields the code-signing set.
+            // Tested via the helper so no codeSigning fixture is required (task 04
+            // adds one later).
+            let sources = auto_sources_from(Ok(true), Ok(false));
+
+            assert_eq!(
+                sources,
+                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfCs]
+            );
+            assert_eq!(
+                auto_purpose_from(Ok(true), Ok(false)),
+                CertPurpose::CodeSigning
+            );
+        }
+
+        #[test]
+        fn auto_code_signing_beats_server_auth() {
+            // Precedence: codeSigning is checked FIRST, so a leaf asserting BOTH
+            // EKUs resolves to CodeSigning, not TlsServer.
+            assert_eq!(
+                auto_purpose_from(Ok(true), Ok(true)),
+                CertPurpose::CodeSigning
+            );
+            assert_eq!(
+                auto_sources_from(Ok(true), Ok(true)),
+                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfCs]
+            );
+        }
+
+        #[test]
+        fn auto_server_auth_without_code_signing_resolves_to_tls_server() {
+            // serverAuth-only (no codeSigning) still resolves to TlsServer.
+            assert_eq!(
+                auto_purpose_from(Ok(false), Ok(true)),
+                CertPurpose::TlsServer
+            );
+            assert_eq!(
+                auto_sources_from(Ok(false), Ok(true)),
+                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfBr]
+            );
+        }
+
+        #[test]
+        fn auto_code_signing_err_on_server_auth_still_code_signing() {
+            // codeSigning present wins even when the serverAuth read errors —
+            // codeSigning is checked first and its Ok(true) short-circuits.
+            assert_eq!(
+                auto_purpose_from(Ok(true), Err(CertError::Der)),
+                CertPurpose::CodeSigning
+            );
         }
 
         #[test]

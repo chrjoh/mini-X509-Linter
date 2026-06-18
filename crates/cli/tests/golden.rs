@@ -12,7 +12,9 @@
 //! finding embeds the current Unix time (`now is <unix>`), which changes every
 //! run, so fixtures that surface that line (e.g. `expired.pem`) are **never**
 //! snapshotted. The chosen fixtures are stable across runs:
-//! - `good.pem` — all 32 lints pass / N/A, no findings.
+//! - `good.pem` — auto resolves to tls-server (serverAuth EKU), so its 32 in-profile lints
+//!   (rfc5280 + cabf_br + hygiene) all pass / N/A; the 8 cabf_cs lints are code-signing-only and
+//!   out of profile here, so they are not run.
 //! - `cabf_br_validity_400_days.pem` — the only finding is the BR validity error
 //!   whose message embeds a fixed day-count (`400 days`), not a timestamp.
 //! - `chain_bundle.pem` — a freshly-generated all-pass leaf + CA, no findings.
@@ -23,7 +25,8 @@
 //! second):
 //! - leaf: RSA-2048/SHA-256, v3, CA:FALSE, `extendedKeyUsage=serverAuth`,
 //!   `subjectAltName=DNS:chain-leaf.example.com`, serial 101, window
-//!   2026-06-01 -> 2027-06-01 (365 days). Passes all 32 lints.
+//!   2026-06-01 -> 2027-06-01 (365 days). Passes all its in-profile lints (a serverAuth leaf, so
+//!   cabf_cs is out of profile and not run).
 //! - CA: RSA-2048/SHA-256, v3, `basicConstraints=critical,CA:TRUE`,
 //!   `keyUsage=critical,keyCertSign,cRLSign`, serial 100, window
 //!   2026-01-01 -> 2036-01-01. CA => cabf_br lints N/A.

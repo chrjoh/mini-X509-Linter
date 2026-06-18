@@ -419,6 +419,157 @@ mod json_output {
     }
 }
 
+mod code_signing_output {
+    use super::*;
+
+    /// The eight `cabf_cs` lint ids the code-signing group must list.
+    const CS_LINT_IDS: [&str; 8] = [
+        "cabf_cs_eku_required",
+        "cabf_cs_key_usage_required",
+        "cabf_cs_rsa_key_size",
+        "cabf_cs_ecdsa_curve_params",
+        "cabf_cs_validity_period_longer_than_39_months",
+        "cabf_cs_validity_period_longer_than_460_days",
+        "cabf_cs_authority_information_access",
+        "cabf_cs_crl_distribution_points",
+    ];
+
+    /// `--purpose code-signing --verbose` on the clean code-signing leaf renders
+    /// the `[cabf_cs]` group with all eight CS lints (passed/applicable), the
+    /// `purpose: code-signing` header, and NO `[cabf_br]` group (the code-signing
+    /// purpose runs Rfc5280 + Hygiene + CabfCs, not CabfBr — so the broad
+    /// serverAuth false positive cannot surface). Exits 0 with no findings.
+    #[test]
+    fn purpose_code_signing_renders_cabf_cs_group_and_header() {
+        // Setup + Invoke.
+        let output = run(&[
+            "--purpose",
+            "code-signing",
+            "--verbose",
+            fixture("cabf_cs_good.pem").to_str().unwrap(),
+        ]);
+
+        // Find.
+        let stdout = stdout_of(&output);
+
+        // Expect: clean exit, the verbose purpose header, the cabf_cs group, all
+        // eight CS lints listed and passing, no cabf_br group, no findings.
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            stdout.contains("purpose: code-signing"),
+            "verbose header must render the code-signing purpose:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("[cabf_cs]"),
+            "missing cabf_cs group header:\n{stdout}"
+        );
+        for id in CS_LINT_IDS {
+            assert!(
+                stdout.contains(&format!("pass  {id}")),
+                "CS lint {id} should be listed as passed:\n{stdout}"
+            );
+        }
+        assert!(
+            !stdout.contains("[cabf_br]"),
+            "the code-signing purpose must not run the cabf_br group:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("OK: no findings"),
+            "the clean CS leaf must report no findings:\n{stdout}"
+        );
+    }
+
+    /// `--source cabf_cs` on the clean code-signing leaf restricts the report to
+    /// the eight CS lints (the only group present), all passing. Proves the
+    /// `--source cabf_cs` token plumbing end-to-end.
+    #[test]
+    fn source_cabf_cs_runs_only_the_cs_group() {
+        // Setup + Invoke.
+        let output = run(&[
+            "--source",
+            "cabf_cs",
+            "--verbose",
+            fixture("cabf_cs_good.pem").to_str().unwrap(),
+        ]);
+
+        // Find.
+        let stdout = stdout_of(&output);
+
+        // Expect: success, the cabf_cs group present with all eight lints, and no
+        // other source group rendered.
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            stdout.contains("[cabf_cs]"),
+            "missing cabf_cs group header:\n{stdout}"
+        );
+        for id in CS_LINT_IDS {
+            assert!(
+                stdout.contains(&format!("pass  {id}")),
+                "CS lint {id} should be listed as passed under --source cabf_cs:\n{stdout}"
+            );
+        }
+        assert!(
+            !stdout.contains("[rfc5280]"),
+            "--source cabf_cs must exclude rfc5280:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("[hygiene]"),
+            "--source cabf_cs must exclude hygiene:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("[cabf_br]"),
+            "--source cabf_cs must exclude cabf_br:\n{stdout}"
+        );
+    }
+
+    /// JSON proof: `--source cabf_cs --format json` emits exactly eight outcomes,
+    /// all carrying the `cabf_cs` source token.
+    #[test]
+    fn source_cabf_cs_json_emits_eight_cabf_cs_outcomes() {
+        // Setup + Invoke.
+        let output = run(&[
+            "--source",
+            "cabf_cs",
+            "--format",
+            "json",
+            fixture("cabf_cs_good.pem").to_str().unwrap(),
+        ]);
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+
+        // Find: parse the document.
+        let stdout = stdout_of(&output);
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("CLI JSON output must be valid JSON");
+        let outcomes = value.as_array().expect("top-level JSON must be an array");
+
+        // Expect: exactly eight outcomes, all `cabf_cs`.
+        assert_eq!(
+            outcomes.len(),
+            8,
+            "--source cabf_cs must yield exactly 8 outcomes"
+        );
+        for o in outcomes {
+            assert_eq!(
+                o["source"],
+                serde_json::json!("cabf_cs"),
+                "every outcome must carry the cabf_cs source token"
+            );
+        }
+    }
+}
+
 mod error_behaviour {
     use super::*;
 

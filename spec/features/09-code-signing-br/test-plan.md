@@ -29,7 +29,7 @@ straddle "now".
 
 | Fixture | shape | isolates |
 |---|---|---|
-| `cabf_cs_good.pem` | codeSigning + digitalSignature + RSA-3072/SHA-256 + ≤460d valid + CA:FALSE + AIA + CRL-DP | nothing (clean, passes 22-lint registry) |
+| `cabf_cs_good.pem` | codeSigning + digitalSignature + RSA-3072/SHA-256 + ≤460d valid + CA:FALSE + AIA + CRL-DP | nothing in the cabf_cs set (clean under code-signing purpose; raw all-source run trips the broad cabf_br serverAuth lint) |
 | `cabf_cs_missing_key_usage.pem` | codeSigning, no digitalSignature KU | `cabf_cs_key_usage_required` (Error) |
 | `cabf_cs_rsa_2048.pem` | codeSigning, RSA-2048 | `cabf_cs_rsa_key_size` (Error) |
 | `cabf_cs_ecdsa_bad_curve.pem` | codeSigning, EC explicit/disallowed curve | `cabf_cs_ecdsa_curve_params` (Error) |
@@ -50,7 +50,7 @@ direct lint invocation on a non-codeSigning leaf.
 
 ## Unit Tests (`registry.rs`, developer task 03)
 
-- `contains_the_known_lints`: 22 lints / 22 outcomes; the 8 `cabf_cs_*` ids present.
+- `contains_the_known_lints`: 40 lints / 40 outcomes; the 8 `cabf_cs_*` ids present.
 - `cabf_cs_source_filter_runs_exactly_the_cabf_cs_set`: 8 outcomes, all `RuleSource::CabfCs`, the 8
   ids, none rfc5280_/hygiene_/cabf_br_.
 - CodeSigning purpose → `[Rfc5280, Hygiene, CabfCs]`.
@@ -108,6 +108,6 @@ bash testdata/generate.sh
 ## Exit Criteria
 
 All 8 `cabf_cs` lints + accessors + source + CodeSigning purpose + CLI wiring validated; codeSigning-gate
-scoping confirmed; the clean CS fixture passes the 22-lint registry; each violating fixture isolates its
+scoping confirmed; the clean CS fixture passes the cabf_cs set (clean under the code-signing purpose); each violating fixture isolates its
 one CS rule (with the documented 40-month/460-day co-fire); the no-cascade property is proven (existing
 suites pass unedited); registry/CLI unit + e2e tests pass; all verification commands green.
