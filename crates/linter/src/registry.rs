@@ -277,6 +277,19 @@ pub fn default_registry() -> Registry {
         Box::new(rfc5280::BasicConstraintsCriticalOnCa::new()),
         Box::new(rfc5280::KeyUsagePresentWhenCa::new()),
         Box::new(rfc5280::SanPresentIfSubjectEmpty::new()),
+        // RFC 5280 depth-expansion lints (feature 12). Appended after the
+        // original six; order is deterministic and matters for the feature 06
+        // golden test — keep it stable.
+        Box::new(rfc5280::CaSubjectFieldEmpty::new()),
+        Box::new(rfc5280::ExtKeyUsageWithoutBits::new()),
+        Box::new(rfc5280::ExtAuthorityKeyIdentifierNoKeyIdentifier::new()),
+        Box::new(rfc5280::ExtSubjectKeyIdentifierMissingCa::new()),
+        Box::new(rfc5280::ExtSubjectKeyIdentifierMissingSubCert::new()),
+        Box::new(rfc5280::PathLenConstraintImproperlyIncluded::new()),
+        Box::new(rfc5280::ExtNameConstraintsNotCritical::new()),
+        Box::new(rfc5280::SubjectDnCountryNotPrintableString::new()),
+        Box::new(rfc5280::ExtSanNoEntries::new()),
+        Box::new(rfc5280::UtcTimeNotInZulu::new()),
         // CA/Browser Forum Baseline Requirements lints (feature 05). Order is
         // deterministic and matters for the feature 06 golden test — keep it
         // stable.
@@ -284,6 +297,17 @@ pub fn default_registry() -> Registry {
         Box::new(cabf_br::CnInSan::new()),
         Box::new(cabf_br::NoInternalNamesOrReservedIp::new()),
         Box::new(cabf_br::ExtKeyUsageServerAuthPresent::new()),
+        // CA/Browser Forum BR depth-expansion lints (feature 12). Appended after
+        // the original four; order is deterministic and matters for the feature
+        // 06 golden test — keep it stable.
+        Box::new(cabf_br::DnsnameUnderscoreInSld::new()),
+        Box::new(cabf_br::DnsnameBadCharacterInLabel::new()),
+        Box::new(cabf_br::DnsnameLabelTooLong::new()),
+        Box::new(cabf_br::DnsnameWildcardLeftOfPublicSuffix::new()),
+        Box::new(cabf_br::OrganizationalUnitNameProhibited::new()),
+        Box::new(cabf_br::SubjectContainsReservedIp::new()),
+        Box::new(cabf_br::ExtraSubjectCommonNames::new()),
+        Box::new(cabf_br::SubjectCountryNotIso::new()),
     ])
 }
 
@@ -609,14 +633,15 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             let cert = sample_cert();
             let outcomes = registry.run(&cert);
 
-            // Expect: the four hygiene lints, all six RFC 5280 lints, and the
-            // four CA/Browser Forum BR lints are wired in and reported — one
-            // outcome per registered lint. `sample_cert()` is a CA, so the four
-            // BR lints are `NotApplicable` but still produce one outcome each,
-            // keeping the outcome count equal to the registry length.
+            // Expect: the four hygiene lints, all sixteen RFC 5280 lints, and
+            // the twelve CA/Browser Forum BR lints are wired in and reported —
+            // one outcome per registered lint. `sample_cert()` is a CA, so the
+            // BR lints and leaf-only rfc5280 lints are `NotApplicable` but still
+            // produce one outcome each, keeping the outcome count equal to the
+            // registry length.
             assert!(!registry.is_empty());
-            assert_eq!(registry.len(), 14);
-            assert_eq!(outcomes.len(), 14);
+            assert_eq!(registry.len(), 32);
+            assert_eq!(outcomes.len(), 32);
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
             for expected in [
@@ -630,10 +655,28 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "rfc5280_basic_constraints_critical_on_ca",
                 "rfc5280_key_usage_present_when_ca",
                 "rfc5280_san_present_if_subject_empty",
+                "rfc5280_ca_subject_field_empty",
+                "rfc5280_ext_key_usage_without_bits",
+                "rfc5280_ext_authority_key_identifier_no_key_identifier",
+                "rfc5280_ext_subject_key_identifier_missing_ca",
+                "rfc5280_ext_subject_key_identifier_missing_sub_cert",
+                "rfc5280_path_len_constraint_improperly_included",
+                "rfc5280_ext_name_constraints_not_critical",
+                "rfc5280_subject_dn_country_not_printable_string",
+                "rfc5280_ext_san_no_entries",
+                "rfc5280_utc_time_not_in_zulu",
                 "cabf_br_validity_max_398_days",
                 "cabf_br_cn_in_san",
                 "cabf_br_no_internal_names_or_reserved_ip",
                 "cabf_br_ext_key_usage_server_auth_present",
+                "cabf_br_dnsname_underscore_in_sld",
+                "cabf_br_dnsname_bad_character_in_label",
+                "cabf_br_dnsname_label_too_long",
+                "cabf_br_dnsname_wildcard_left_of_public_suffix",
+                "cabf_br_organizational_unit_name_prohibited",
+                "cabf_br_subject_contains_reserved_ip",
+                "cabf_br_extra_subject_common_names",
+                "cabf_br_subject_country_not_iso",
             ] {
                 assert!(
                     ids.contains(&expected),
@@ -644,14 +687,14 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
 
         #[test]
         fn rfc5280_source_filter_runs_exactly_the_rfc5280_set() {
-            // Setup & Invoke: filtering by RuleSource::Rfc5280 must select the six
-            // RFC 5280 lints and nothing else (e.g. not the hygiene lint).
+            // Setup & Invoke: filtering by RuleSource::Rfc5280 must select the
+            // sixteen RFC 5280 lints and nothing else (e.g. not the hygiene lint).
             let registry = default_registry();
             let cert = sample_cert();
             let outcomes = registry.run_filtered(&cert, &[RuleSource::Rfc5280]);
 
             // Expect
-            assert_eq!(outcomes.len(), 6);
+            assert_eq!(outcomes.len(), 16);
             assert!(outcomes.iter().all(|o| o.source == RuleSource::Rfc5280));
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
@@ -662,6 +705,16 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "rfc5280_basic_constraints_critical_on_ca",
                 "rfc5280_key_usage_present_when_ca",
                 "rfc5280_san_present_if_subject_empty",
+                "rfc5280_ca_subject_field_empty",
+                "rfc5280_ext_key_usage_without_bits",
+                "rfc5280_ext_authority_key_identifier_no_key_identifier",
+                "rfc5280_ext_subject_key_identifier_missing_ca",
+                "rfc5280_ext_subject_key_identifier_missing_sub_cert",
+                "rfc5280_path_len_constraint_improperly_included",
+                "rfc5280_ext_name_constraints_not_critical",
+                "rfc5280_subject_dn_country_not_printable_string",
+                "rfc5280_ext_san_no_entries",
+                "rfc5280_utc_time_not_in_zulu",
             ] {
                 assert!(
                     ids.contains(&expected),
@@ -704,8 +757,8 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
         #[test]
         fn cabf_br_source_filter_runs_exactly_the_cabf_br_set() {
             // Setup & Invoke: filtering by RuleSource::CabfBr must select the
-            // four BR lints and nothing else (no RFC 5280 or hygiene lints).
-            // Filtering is by source, before applicability, so the four BR lints
+            // twelve BR lints and nothing else (no RFC 5280 or hygiene lints).
+            // Filtering is by source, before applicability, so the BR lints
             // appear even though `sample_cert()` is a CA (they are NotApplicable
             // but still emitted as outcomes).
             let registry = default_registry();
@@ -713,7 +766,7 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             let outcomes = registry.run_filtered(&cert, &[RuleSource::CabfBr]);
 
             // Expect
-            assert_eq!(outcomes.len(), 4);
+            assert_eq!(outcomes.len(), 12);
             assert!(outcomes.iter().all(|o| o.source == RuleSource::CabfBr));
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
@@ -722,6 +775,14 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "cabf_br_cn_in_san",
                 "cabf_br_no_internal_names_or_reserved_ip",
                 "cabf_br_ext_key_usage_server_auth_present",
+                "cabf_br_dnsname_underscore_in_sld",
+                "cabf_br_dnsname_bad_character_in_label",
+                "cabf_br_dnsname_label_too_long",
+                "cabf_br_dnsname_wildcard_left_of_public_suffix",
+                "cabf_br_organizational_unit_name_prohibited",
+                "cabf_br_subject_contains_reserved_ip",
+                "cabf_br_extra_subject_common_names",
+                "cabf_br_subject_country_not_iso",
             ] {
                 assert!(
                     ids.contains(&expected),

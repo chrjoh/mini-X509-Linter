@@ -2,7 +2,7 @@
 agent: developer
 seq: 3
 title: New CA/Browser Forum BR expansion lints
-status: pending
+status: done
 touches:
   - crates/linter/src/lints/cabf_br/mod.rs
   - crates/linter/src/lints/cabf_br/dnsname_syntax.rs

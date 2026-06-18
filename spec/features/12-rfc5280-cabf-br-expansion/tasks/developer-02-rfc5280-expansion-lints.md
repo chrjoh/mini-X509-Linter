@@ -2,7 +2,7 @@
 agent: developer
 seq: 2
 title: New RFC 5280 expansion lints
-status: pending
+status: done
 touches:
   - crates/linter/src/lints/rfc5280/mod.rs
   - crates/linter/src/lints/rfc5280/ca_subject_field_empty.rs

@@ -2,7 +2,7 @@
 agent: tester
 seq: 5
 title: Expansion fixtures + per-lint/isolation tests + golden snapshot
-status: pending
+status: done
 touches:
   - testdata/generate.sh
   - testdata/rfc5280_ca_subject_empty.pem
@@ -35,7 +35,7 @@ depends_on:
 
 Add ONE openssl-generated violating fixture per new lint, write per-lint flag/pass tests, extend the
 existing isolation tests to the new fixtures, and regenerate the feature-06 golden snapshot for the
-24-lint registry. **No existing fixture is regenerated** (see plan's good.pem Conformance Audit) — only
+32-lint registry. **No existing fixture is regenerated** (see plan's good.pem Conformance Audit) — only
 NEW fixtures are added. Verify the existing isolation/invariant tests still pass UNCHANGED.
 
 ## ⚠️ Time-Fragility (inherited)
@@ -59,7 +59,7 @@ Does NOT modify `cert.rs`, `registry.rs`, any `src/lints/`, or the existing fixt
 
 ### 1. Add fixtures to `generate.sh` (openssl only; never hand-author cert bytes beyond byte-patching)
 
-Add one violating fixture per new lint, each isolating EXACTLY its one new rule across the FULL 24-lint
+Add one violating fixture per new lint, each isolating EXACTLY its one new rule across the FULL 32-lint
 registry AND firing no OLD rule. Use the plan's "Fixture Strategy" table for shapes. Reuse the existing
 `make_leaf_ext`/`sign_csr` helpers and `BR_OK`/CA windows. Public names use `*.example.com` (per the
 existing reserved-name note) unless the target requires otherwise.
@@ -105,7 +105,7 @@ Run `bash testdata/generate.sh` and commit every new `.pem`.
 - Per new RFC lint: its fixture → ≥1 expected finding (severity + relevant message substring);
   `good.pem` → no rfc5280 Error/Fatal (unchanged).
 - Extend `each_fixture_isolates_exactly_one_rfc5280_violation` (or add a sibling) to cover the new
-  rfc5280 fixtures: each fires exactly its one rule across the 24-lint registry and no BR rule.
+  rfc5280 fixtures: each fires exactly its one rule across the 32-lint registry and no BR rule.
 - SKI-missing-sub-cert fixture asserts a `Warn` (SHOULD), not `Error`.
 
 ### 3. `crates/linter/tests/cabf_br.rs` (extend)
@@ -120,7 +120,7 @@ Run `bash testdata/generate.sh` and commit every new `.pem`.
 
 ### 4. Golden snapshot (feature 06)
 
-- Regenerate the golden snapshot so it includes the new lint outcomes (24 lints). Confirm the existing
+- Regenerate the golden snapshot so it includes the new lint outcomes (32 lints). Confirm the existing
   rows are unchanged in order and only new rows are appended. If regeneration touches an out-of-scope
   file, FLAG to the architect.
 
@@ -134,12 +134,12 @@ Run `bash testdata/generate.sh` and commit every new `.pem`.
 ## Acceptance Criteria
 
 - [ ] 18 new openssl-generated fixtures added (10 rfc5280 + 8 BR), each isolating exactly its one new
-      rule across the 24-lint registry (with the one documented `cabf_br_cn_reserved_ip` exception);
+      rule across the 32-lint registry (with the one documented `cabf_br_cn_reserved_ip` exception);
       NO existing fixture regenerated.
 - [ ] Per-new-lint flag/pass tests in `rfc5280.rs` and `cabf_br.rs`; SKI-sub-cert asserts `Warn`.
 - [ ] Isolation coverage extended to the new fixtures; existing isolation/invariant tests pass
       UNCHANGED.
-- [ ] Golden snapshot regenerated for the 24-lint registry (existing rows unchanged, new rows appended).
+- [ ] Golden snapshot regenerated for the 32-lint registry (existing rows unchanged, new rows appended).
 - [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and
       `bash testdata/generate.sh` all pass cleanly.
 - [ ] Any non-producible fixture (utctime/country/path-len) FLAGGED with its pre-approved lint cut, not
@@ -147,5 +147,5 @@ Run `bash testdata/generate.sh` and commit every new `.pem`.
 
 ## Notes / Dependencies
 
-- Depends on task 04 (lints registered; the 24-lint registry exists).
+- Depends on task 04 (lints registered; the 32-lint registry exists).
 - This is the sole owner of fixtures and integration tests; production `src/` is owned by tasks 01–04.

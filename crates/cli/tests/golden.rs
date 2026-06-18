@@ -12,7 +12,7 @@
 //! finding embeds the current Unix time (`now is <unix>`), which changes every
 //! run, so fixtures that surface that line (e.g. `expired.pem`) are **never**
 //! snapshotted. The chosen fixtures are stable across runs:
-//! - `good.pem` — all 14 lints pass / N/A, no findings.
+//! - `good.pem` — all 32 lints pass / N/A, no findings.
 //! - `cabf_br_validity_400_days.pem` — the only finding is the BR validity error
 //!   whose message embeds a fixed day-count (`400 days`), not a timestamp.
 //! - `chain_bundle.pem` — a freshly-generated all-pass leaf + CA, no findings.
@@ -23,7 +23,7 @@
 //! second):
 //! - leaf: RSA-2048/SHA-256, v3, CA:FALSE, `extendedKeyUsage=serverAuth`,
 //!   `subjectAltName=DNS:chain-leaf.example.com`, serial 101, window
-//!   2026-06-01 -> 2027-06-01 (365 days). Passes all 14 lints.
+//!   2026-06-01 -> 2027-06-01 (365 days). Passes all 32 lints.
 //! - CA: RSA-2048/SHA-256, v3, `basicConstraints=critical,CA:TRUE`,
 //!   `keyUsage=critical,keyCertSign,cRLSign`, serial 100, window
 //!   2026-01-01 -> 2036-01-01. CA => cabf_br lints N/A.
@@ -117,7 +117,7 @@ mod verbose_output {
         // header, no per-lint lines.
         let out = stdout(&[&fixture_arg("good.pem")]);
         assert!(
-            out.contains("(3 passed, 3 not applicable)"),
+            out.contains("(7 passed, 9 not applicable)"),
             "default text must keep the collapsed per-group summary"
         );
         assert!(

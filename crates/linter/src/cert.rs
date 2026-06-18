@@ -14,7 +14,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 use x509_parser::asn1_rs::Oid;
 use x509_parser::certificate::X509Certificate;
-use x509_parser::extensions::GeneralName;
+use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::objects::{oid_registry, oid2sn};
 use x509_parser::pem::Pem;
 use x509_parser::prelude::FromDer;
@@ -127,6 +127,12 @@ pub struct EkuView {
     pub server_auth: bool,
     /// `true` if the `clientAuth` purpose (OID `1.3.6.1.5.5.7.3.2`) is present.
     pub client_auth: bool,
+    /// `true` if the extension carries NO key purposes at all: not `anyExtendedKeyUsage`,
+    /// no recognised purpose bit, and no `other` purpose OIDs.
+    ///
+    /// RFC 5280 §4.2.1.12 requires the EKU extension to contain at least one
+    /// `KeyPurposeId`; `ext_key_usage_without_bits` flags the empty case.
+    pub is_empty: bool,
     /// Every EKU purpose OID in dotted-decimal form, in encounter order.
     pub oids: Vec<String>,
 }
@@ -165,6 +171,49 @@ pub struct NamedCurve {
     /// A human-readable short name from `oid-registry`, or `None` if the OID is
     /// not in the registry.
     pub name: Option<String>,
+}
+
+/// A read-only view of the certificate's Authority Key Identifier extension.
+///
+/// Carries what `ext_authority_key_identifier_no_key_identifier` needs
+/// (RFC 5280 §4.2.1.1): whether the AKI carries a `keyIdentifier` field and
+/// whether the extension is marked critical. A view is only produced when the
+/// AKI extension is present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AkiView {
+    /// `true` if the AKI contains a `keyIdentifier` field.
+    pub has_key_identifier: bool,
+    /// `true` if the extension is marked critical.
+    pub critical: bool,
+}
+
+/// A read-only view of the certificate's Name Constraints extension.
+///
+/// Carries only what `ext_name_constraints_not_critical` needs
+/// (RFC 5280 §4.2.1.10, which requires the extension to be marked critical):
+/// whether the extension is critical. A view is only produced when the
+/// extension is present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NameConstraintsView {
+    /// `true` if the extension is marked critical.
+    pub critical: bool,
+}
+
+/// A read-only view of how a single validity time field is DER-encoded.
+///
+/// Carries what `utc_time_not_in_zulu` needs (RFC 5280 §4.1.2.5.1): whether the
+/// field is a `UTCTime` (tag `0x17`) versus a `GeneralizedTime` (tag `0x18`),
+/// and whether the encoded value ends in the Zulu marker `Z`. Derived from the
+/// raw DER of the Validity SEQUENCE; see
+/// [`validity_time_encodings`](Cert::validity_time_encodings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeEncoding {
+    /// `true` if the field is encoded as `UTCTime` (DER tag `0x17`); `false` if
+    /// it is `GeneralizedTime` (DER tag `0x18`).
+    pub is_utc_time: bool,
+    /// `true` if the encoded value's last content octet is the Zulu marker
+    /// (`b'Z'`).
+    pub is_zulu: bool,
 }
 
 impl Cert {
@@ -518,6 +567,7 @@ impl Cert {
                     critical: ext.critical,
                     server_auth: eku.server_auth,
                     client_auth: eku.client_auth,
+                    is_empty: eku_is_empty(eku),
                     oids: eku_oid_strings(eku),
                 }
             })
@@ -686,6 +736,199 @@ impl Cert {
         })
     }
 
+    /// The Authority Key Identifier extension as an [`AkiView`], or `None` if
+    /// the extension is absent.
+    ///
+    /// Relied on by `ext_authority_key_identifier_no_key_identifier`
+    /// (RFC 5280 §4.2.1.1). [`has_key_identifier`](AkiView::has_key_identifier)
+    /// reflects whether the `keyIdentifier` field is present in the AKI. A
+    /// malformed extension is treated as absent (`None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn authority_key_identifier(&self) -> Result<Option<AkiView>, CertError> {
+        // OID 2.5.29.35 = id-ce-authorityKeyIdentifier (RFC 5280 §4.2.1.1).
+        let oid = Oid::from(&[2, 5, 29, 35]).map_err(|_| CertError::Der)?;
+        self.with_parsed(|c| {
+            // A duplicated AKI is treated as absent (`None`) rather than an error.
+            c.get_extension_unique(&oid).ok().flatten().and_then(|ext| {
+                if let ParsedExtension::AuthorityKeyIdentifier(aki) = ext.parsed_extension() {
+                    Some(AkiView {
+                        has_key_identifier: aki.key_identifier.is_some(),
+                        critical: ext.critical,
+                    })
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    /// Whether the certificate carries a Subject Key Identifier extension.
+    ///
+    /// Relied on by both SKI-presence lints
+    /// (`ext_subject_key_identifier_missing_ca` and `..._missing_sub_cert`,
+    /// RFC 5280 §4.2.1.2). Returns `false` when the extension is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn has_subject_key_identifier(&self) -> Result<bool, CertError> {
+        // OID 2.5.29.14 = id-ce-subjectKeyIdentifier (RFC 5280 §4.2.1.2).
+        let oid = Oid::from(&[2, 5, 29, 14]).map_err(|_| CertError::Der)?;
+        self.with_parsed(|c| {
+            c.get_extension_unique(&oid)
+                .ok()
+                .flatten()
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.parsed_extension(),
+                        ParsedExtension::SubjectKeyIdentifier(_)
+                    )
+                })
+        })
+    }
+
+    /// The Name Constraints extension as a [`NameConstraintsView`], or `None`
+    /// if the extension is absent.
+    ///
+    /// Relied on by `ext_name_constraints_not_critical` (RFC 5280 §4.2.1.10,
+    /// which requires conforming CAs to mark Name Constraints critical). A
+    /// malformed or duplicated extension is treated as absent (`None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn name_constraints(&self) -> Result<Option<NameConstraintsView>, CertError> {
+        self.with_parsed(|c| {
+            c.name_constraints()
+                .ok()
+                .flatten()
+                .map(|ext| NameConstraintsView {
+                    critical: ext.critical,
+                })
+        })
+    }
+
+    /// The subject `countryName` (C, OID 2.5.4.6) attribute values, in encounter
+    /// order, as owned strings.
+    ///
+    /// Consumed by `cabf_br_subject_country_not_iso` (BR §7.1.4.2.2). Returns an
+    /// empty `Vec` when the subject has no `countryName` attribute. Values that
+    /// are not valid UTF-8 are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_country_values(&self) -> Result<Vec<String>, CertError> {
+        self.with_parsed(|c| {
+            c.subject()
+                .iter_country()
+                .filter_map(|atv| atv.as_str().ok().map(str::to_owned))
+                .collect()
+        })
+    }
+
+    /// Whether the subject `countryName` (C) attribute value is DER-encoded as a
+    /// `PrintableString`, or `None` when no `countryName` attribute is present.
+    ///
+    /// RFC 5280 Appendix A defines `X520countryName ::= PrintableString`, so a
+    /// conforming `countryName` value MUST carry the `PrintableString` tag
+    /// (universal tag number 19, DER `0x13`). x509-parser decodes the value to a
+    /// plain string and offers no facade-level string-type predicate, so this
+    /// inspects the ASN.1 tag the parser read from the attribute value's DER
+    /// header (`attr_value().tag()`). The check is on the DER tag, not the
+    /// decoded text. `Some(true)` when that tag number is `PrintableString`,
+    /// `Some(false)` for any other string type (e.g. UTF8String tag 12 / `0x0C`,
+    /// IA5String tag 22 / `0x16`), and `None` when there is no `countryName`
+    /// attribute.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_country_is_printable_string(&self) -> Result<Option<bool>, CertError> {
+        self.with_parsed(|c| {
+            c.subject()
+                .iter_country()
+                .next()
+                // `Tag` is a thin newtype over the ASN.1 universal tag number;
+                // PrintableString is 19. Reading it inspects the value's DER
+                // header tag, which x509-parser preserves on the `Any` value.
+                .map(|atv| atv.attr_value().tag().0 == TAG_NUM_PRINTABLE_STRING)
+        })
+    }
+
+    /// The number of `organizationalUnitName` (OU, OID 2.5.4.11) attributes in
+    /// the subject DN.
+    ///
+    /// Consumed by `cabf_br_organizational_unit_name_prohibited` (BR §7.1.4.2.2,
+    /// which prohibits the OU attribute). Returns `0` when the subject has no OU
+    /// attribute.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_organizational_unit_count(&self) -> Result<usize, CertError> {
+        self.with_parsed(|c| c.subject().iter_organizational_unit().count())
+    }
+
+    /// The DER time encodings of the `notBefore` and `notAfter` validity fields,
+    /// as `(not_before, not_after)`.
+    ///
+    /// Consumed by `utc_time_not_in_zulu` (RFC 5280 §4.1.2.5.1, which requires a
+    /// `UTCTime` to be expressed in Zulu form ending in `Z`). x509-parser
+    /// normalises both fields to a single `ASN1Time` type, discarding whether
+    /// the field was a `UTCTime` or `GeneralizedTime` and whether it ended in
+    /// `Z`. This therefore walks the raw certificate DER to the Validity
+    /// SEQUENCE and reads each time field's tag and trailing octet directly:
+    /// `Certificate ::= SEQUENCE { tbsCertificate SEQUENCE { [0] version
+    /// OPTIONAL, serialNumber INTEGER, signature SEQUENCE, issuer SEQUENCE,
+    /// validity SEQUENCE { notBefore Time, notAfter Time }, ... }, ... }`. For
+    /// each `Time`, tag `0x17` = `UTCTime`, `0x18` = `GeneralizedTime`, and
+    /// `is_zulu` is `true` when the last content octet is `b'Z'`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER cannot be walked to the
+    /// Validity SEQUENCE (it was validated as a certificate at construction
+    /// time, so this should not occur in practice).
+    pub fn validity_time_encodings(&self) -> Result<(TimeEncoding, TimeEncoding), CertError> {
+        // Certificate SEQUENCE -> tbsCertificate SEQUENCE.
+        let cert_body = tlv_content(&self.der, TAG_SEQUENCE).ok_or(CertError::Der)?;
+        let tbs_body = tlv_content(cert_body, TAG_SEQUENCE).ok_or(CertError::Der)?;
+
+        // Inside tbsCertificate, skip the optional [0] version, then INTEGER
+        // serialNumber, SEQUENCE signature, SEQUENCE issuer, to reach the
+        // Validity SEQUENCE. Skip a leading context-specific [0] (tag 0xA0)
+        // version wrapper if present.
+        let mut rest = tbs_body;
+        if rest.first() == Some(&TAG_VERSION_CONTEXT) {
+            rest = tlv_skip(rest).ok_or(CertError::Der)?;
+        }
+        // serialNumber INTEGER
+        rest = tlv_skip(rest).ok_or(CertError::Der)?;
+        // signature AlgorithmIdentifier SEQUENCE
+        rest = tlv_skip(rest).ok_or(CertError::Der)?;
+        // issuer Name SEQUENCE
+        rest = tlv_skip(rest).ok_or(CertError::Der)?;
+        // validity SEQUENCE
+        let validity_body = tlv_content(rest, TAG_SEQUENCE).ok_or(CertError::Der)?;
+
+        // notBefore Time
+        let (not_before, after_nb) = read_time(validity_body).ok_or(CertError::Der)?;
+        // notAfter Time
+        let (not_after, _rest) = read_time(after_nb).ok_or(CertError::Der)?;
+
+        Ok((not_before, not_after))
+    }
+
     /// The raw DER bytes backing this certificate.
     pub fn der_bytes(&self) -> &[u8] {
         &self.der
@@ -750,6 +993,100 @@ fn eku_oid_strings(eku: &x509_parser::extensions::ExtendedKeyUsage<'_>) -> Vec<S
         oids.push(oid.to_string());
     }
     oids
+}
+
+/// Whether a parsed [`ExtendedKeyUsage`] carries no key purposes at all: not
+/// `anyExtendedKeyUsage`, no recognised purpose bit, and no `other` OIDs.
+///
+/// RFC 5280 §4.2.1.12 requires at least one `KeyPurposeId`; this is the empty
+/// case `ext_key_usage_without_bits` flags.
+///
+/// [`ExtendedKeyUsage`]: x509_parser::extensions::ExtendedKeyUsage
+fn eku_is_empty(eku: &x509_parser::extensions::ExtendedKeyUsage<'_>) -> bool {
+    !eku.any
+        && !eku.server_auth
+        && !eku.client_auth
+        && !eku.code_signing
+        && !eku.email_protection
+        && !eku.time_stamping
+        && !eku.ocsp_signing
+        && eku.other.is_empty()
+}
+
+/// DER universal tag for `SEQUENCE` (constructed), used when walking the raw
+/// certificate DER.
+const TAG_SEQUENCE: u8 = 0x30;
+/// DER tag for the optional `[0]` context-specific `version` wrapper inside
+/// `tbsCertificate` (constructed, context class).
+const TAG_VERSION_CONTEXT: u8 = 0xA0;
+/// DER universal tag for `UTCTime`.
+const TAG_UTC_TIME: u8 = 0x17;
+/// DER universal tag for `GeneralizedTime`.
+const TAG_GENERALIZED_TIME: u8 = 0x18;
+/// ASN.1 universal tag number for `PrintableString` (DER tag `0x13`).
+const TAG_NUM_PRINTABLE_STRING: u32 = 19;
+
+/// Reads one DER TLV at the start of `input`, returning `(tag, content, rest)`
+/// where `content` is the value octets and `rest` is everything after this TLV.
+///
+/// Supports short-form and long-form definite lengths only (DER never uses the
+/// indefinite form). Returns `None` on any malformed or truncated header.
+fn read_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let tag = *input.first()?;
+    let len_byte = *input.get(1)?;
+    let (len, header_len) = if len_byte & 0x80 == 0 {
+        // Short form: the length is the byte itself.
+        (len_byte as usize, 2)
+    } else {
+        // Long form: low 7 bits give the number of subsequent length octets.
+        let num = (len_byte & 0x7f) as usize;
+        // Reject the reserved 0x80 (indefinite) form and oversized counts that
+        // could not fit in a usize.
+        if num == 0 || num > core::mem::size_of::<usize>() {
+            return None;
+        }
+        let mut len = 0usize;
+        for i in 0..num {
+            len = (len << 8) | (*input.get(2 + i)? as usize);
+        }
+        (len, 2 + num)
+    };
+    let content = input.get(header_len..header_len.checked_add(len)?)?;
+    let rest = &input[header_len + len..];
+    Some((tag, content, rest))
+}
+
+/// Returns the content octets of the TLV at the start of `input` if its tag
+/// equals `expected_tag`, else `None`.
+fn tlv_content(input: &[u8], expected_tag: u8) -> Option<&[u8]> {
+    let (tag, content, _rest) = read_tlv(input)?;
+    (tag == expected_tag).then_some(content)
+}
+
+/// Skips the TLV at the start of `input`, returning the bytes that follow it.
+fn tlv_skip(input: &[u8]) -> Option<&[u8]> {
+    read_tlv(input).map(|(_tag, _content, rest)| rest)
+}
+
+/// Reads a `Time` TLV (`UTCTime` `0x17` or `GeneralizedTime` `0x18`) at the
+/// start of `input`, returning its [`TimeEncoding`] and the trailing bytes.
+///
+/// `is_zulu` is `true` when the value's last content octet is `b'Z'`.
+fn read_time(input: &[u8]) -> Option<(TimeEncoding, &[u8])> {
+    let (tag, content, rest) = read_tlv(input)?;
+    let is_utc_time = match tag {
+        TAG_UTC_TIME => true,
+        TAG_GENERALIZED_TIME => false,
+        _ => return None,
+    };
+    let is_zulu = content.last() == Some(&b'Z');
+    Some((
+        TimeEncoding {
+            is_utc_time,
+            is_zulu,
+        },
+        rest,
+    ))
 }
 
 /// Computes the bit length of a DER INTEGER modulus, stripping a single
@@ -1049,6 +1386,232 @@ mod tests {
             assert!(ip_from_san_octets(&[]).is_none());
             assert!(ip_from_san_octets(&[1, 2, 3]).is_none());
             assert!(ip_from_san_octets(&[0u8; 5]).is_none());
+        }
+    }
+
+    mod feature12_accessors {
+        use super::*;
+
+        /// Loads the workspace `testdata/good.pem` fixture (a BR-compliant v3
+        /// leaf: SKI present, EKU=serverAuth, SAN with one dNSName, no AKI, no
+        /// NameConstraints, no country/OU attributes, UTCTime Zulu validity).
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        #[test]
+        fn good_cert_has_no_authority_key_identifier() {
+            let cert = good_cert();
+
+            // Absent case: good.pem carries no AKI extension.
+            assert!(cert.authority_key_identifier().unwrap().is_none());
+        }
+
+        #[test]
+        fn good_cert_has_subject_key_identifier() {
+            let cert = good_cert();
+
+            // Present case: good.pem carries a SubjectKeyIdentifier extension.
+            assert!(cert.has_subject_key_identifier().unwrap());
+        }
+
+        #[test]
+        fn good_cert_has_no_name_constraints() {
+            let cert = good_cert();
+
+            // Absent case: good.pem carries no NameConstraints extension.
+            assert!(cert.name_constraints().unwrap().is_none());
+        }
+
+        #[test]
+        fn good_cert_eku_is_not_empty() {
+            let cert = good_cert();
+
+            let eku = cert.extended_key_usage().unwrap().unwrap();
+
+            // good.pem's EKU asserts serverAuth, so it is not empty.
+            assert!(!eku.is_empty, "good.pem EKU carries serverAuth");
+        }
+
+        #[test]
+        fn good_cert_has_no_country_attribute() {
+            let cert = good_cert();
+
+            // Absent country: empty values and None string-type predicate.
+            assert!(cert.subject_country_values().unwrap().is_empty());
+            assert!(
+                cert.subject_country_is_printable_string()
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn good_cert_has_no_organizational_unit() {
+            let cert = good_cert();
+
+            assert_eq!(cert.subject_organizational_unit_count().unwrap(), 0);
+        }
+
+        #[test]
+        fn good_cert_validity_is_utc_time_in_zulu() {
+            let cert = good_cert();
+
+            let (not_before, not_after) = cert.validity_time_encodings().unwrap();
+
+            // good.pem's window (2026-06-01 -> 2027-06-01, both pre-2050) is
+            // encoded as UTCTime ending in Z.
+            assert!(not_before.is_utc_time, "notBefore is UTCTime");
+            assert!(not_before.is_zulu, "notBefore ends in Z");
+            assert!(not_after.is_utc_time, "notAfter is UTCTime");
+            assert!(not_after.is_zulu, "notAfter ends in Z");
+        }
+    }
+
+    mod eku_is_empty {
+        use super::super::eku_is_empty;
+        use x509_parser::asn1_rs::Oid;
+        use x509_parser::extensions::ExtendedKeyUsage;
+
+        /// An EKU with every flag cleared and no `other` OIDs is empty.
+        fn empty_eku() -> ExtendedKeyUsage<'static> {
+            ExtendedKeyUsage {
+                any: false,
+                server_auth: false,
+                client_auth: false,
+                code_signing: false,
+                email_protection: false,
+                time_stamping: false,
+                ocsp_signing: false,
+                other: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn no_purposes_is_empty() {
+            assert!(eku_is_empty(&empty_eku()));
+        }
+
+        #[test]
+        fn recognised_purpose_is_not_empty() {
+            let mut eku = empty_eku();
+            eku.server_auth = true;
+
+            assert!(!eku_is_empty(&eku));
+        }
+
+        #[test]
+        fn any_purpose_is_not_empty() {
+            let mut eku = empty_eku();
+            eku.any = true;
+
+            assert!(!eku_is_empty(&eku));
+        }
+
+        #[test]
+        fn other_oid_is_not_empty() {
+            let mut eku = empty_eku();
+            eku.other.push(Oid::from(&[1, 2, 3]).unwrap());
+
+            assert!(!eku_is_empty(&eku));
+        }
+    }
+
+    mod der_tlv {
+        use super::super::{TAG_SEQUENCE, read_time, read_tlv, tlv_content, tlv_skip};
+
+        #[test]
+        fn reads_short_form_tlv() {
+            // INTEGER 0x02, len 1, value 0x05, then a trailing byte.
+            let (tag, content, rest) = read_tlv(&[0x02, 0x01, 0x05, 0xFF]).unwrap();
+
+            assert_eq!(tag, 0x02);
+            assert_eq!(content, &[0x05]);
+            assert_eq!(rest, &[0xFF]);
+        }
+
+        #[test]
+        fn reads_long_form_length() {
+            // SEQUENCE, long-form length 0x81 0x02 (2 octets), value 0xAA 0xBB.
+            let bytes = [0x30, 0x81, 0x02, 0xAA, 0xBB];
+
+            let content = tlv_content(&bytes, TAG_SEQUENCE).unwrap();
+
+            assert_eq!(content, &[0xAA, 0xBB]);
+        }
+
+        #[test]
+        fn rejects_truncated_content() {
+            // Claims 4 content octets but only 1 is present.
+            assert!(read_tlv(&[0x04, 0x04, 0x01]).is_none());
+        }
+
+        #[test]
+        fn rejects_indefinite_length() {
+            // 0x80 is the reserved indefinite-length form (not valid DER).
+            assert!(read_tlv(&[0x30, 0x80, 0x00, 0x00]).is_none());
+        }
+
+        #[test]
+        fn tlv_content_rejects_wrong_tag() {
+            // The bytes are an INTEGER, not a SEQUENCE.
+            assert!(tlv_content(&[0x02, 0x01, 0x00], TAG_SEQUENCE).is_none());
+        }
+
+        #[test]
+        fn tlv_skip_advances_past_one_tlv() {
+            // Two back-to-back INTEGERs; skipping the first yields the second.
+            let rest = tlv_skip(&[0x02, 0x01, 0x05, 0x02, 0x01, 0x06]).unwrap();
+
+            assert_eq!(rest, &[0x02, 0x01, 0x06]);
+        }
+
+        #[test]
+        fn read_time_detects_utc_time_in_zulu() {
+            // UTCTime "260601000000Z" (tag 0x17), len 13.
+            let mut bytes = vec![0x17, 0x0D];
+            bytes.extend_from_slice(b"260601000000Z");
+
+            let (enc, rest) = read_time(&bytes).unwrap();
+
+            assert!(enc.is_utc_time);
+            assert!(enc.is_zulu);
+            assert!(rest.is_empty());
+        }
+
+        #[test]
+        fn read_time_detects_utc_time_offset_not_zulu() {
+            // UTCTime "2606010000000000" with no trailing Z (offset form).
+            let value = b"2606010000+0000";
+            let mut bytes = vec![0x17, value.len() as u8];
+            bytes.extend_from_slice(value);
+
+            let (enc, _rest) = read_time(&bytes).unwrap();
+
+            assert!(enc.is_utc_time);
+            assert!(!enc.is_zulu, "offset form does not end in Z");
+        }
+
+        #[test]
+        fn read_time_detects_generalized_time() {
+            // GeneralizedTime "20500601000000Z" (tag 0x18), len 15.
+            let value = b"20500601000000Z";
+            let mut bytes = vec![0x18, value.len() as u8];
+            bytes.extend_from_slice(value);
+
+            let (enc, _rest) = read_time(&bytes).unwrap();
+
+            assert!(!enc.is_utc_time, "tag 0x18 is GeneralizedTime");
+            assert!(enc.is_zulu);
+        }
+
+        #[test]
+        fn read_time_rejects_non_time_tag() {
+            // An INTEGER is not a Time field.
+            assert!(read_time(&[0x02, 0x01, 0x00]).is_none());
         }
     }
 

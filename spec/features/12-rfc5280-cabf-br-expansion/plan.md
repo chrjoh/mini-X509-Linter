@@ -269,12 +269,12 @@ dependency-free and false-positive-safe; the docstring states the limitation exp
 - `src/lints/cabf_br/extra_subject_common_names.rs` (task 03)
 - `src/lints/cabf_br/subject_country_not_iso.rs` (task 03)
 - `src/registry.rs` — append new lints to `default_registry()`; update the in-file count test
-  (14 → 24), the rfc5280 filter test (6 → 16), the cabf_br filter test (4 → 12); hygiene filter (4)
+  (14 → 32), the rfc5280 filter test (6 → 16), the cabf_br filter test (4 → 12); hygiene filter (4)
   unchanged (task 04)
 
 **testdata/ (tester — task 05)**
 - `generate.sh` — add one openssl-generated violating fixture per new lint (see Fixture Strategy).
-- New fixtures (one per shipped lint, each isolating exactly its rule across the FULL 24-lint
+- New fixtures (one per shipped lint, each isolating exactly its rule across the FULL 32-lint
   registry): see Fixture Strategy table for the list and shape.
 - Existing fixtures UNCHANGED (no regeneration).
 
@@ -318,7 +318,7 @@ applies to every new leaf fixture — `generate.sh` already documents it; the ne
 | `cabf_br_country_not_iso.pem` (subject_country_not_iso) | leaf, subject C=`ZZ`/`USA` (not a valid alpha-2) |
 
 > Fixture isolation caveats the tester must mind (each fixture fires EXACTLY its one new rule across
-> the full 24-lint registry, and no OLD rule):
+> the full 32-lint registry, and no OLD rule):
 > - Several DNS-syntax fixtures put an illegal character in a SAN dNSName. The illegal name must NOT
 >   also be the CN-in-SAN matcher — keep a separate compliant `DNS:<cn>` entry so `cabf_br_cn_in_san`
 >   stays quiet, and ensure the bad name is not an internal/reserved name (so

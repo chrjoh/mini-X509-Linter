@@ -130,7 +130,7 @@ mod text_output {
             "missing rfc5280 group header:\n{stdout}"
         );
         assert!(
-            stdout.contains("(3 passed, 3 not applicable)"),
+            stdout.contains("(7 passed, 9 not applicable)"),
             "missing passed/not-applicable summary:\n{stdout}"
         );
         assert!(

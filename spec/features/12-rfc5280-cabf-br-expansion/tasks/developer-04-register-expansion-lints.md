@@ -2,7 +2,7 @@
 agent: developer
 seq: 4
 title: Register expansion lints + update count/filter unit tests
-status: pending
+status: done
 touches:
   - crates/linter/src/registry.rs
 depends_on:
@@ -36,10 +36,10 @@ Does NOT touch `cert.rs`, any `lints/`, `source.rs`, or any fixtures/integration
    - If task 01/02 cut `rfc5280_utc_time_not_in_zulu`, register one fewer rfc5280 lint and adjust the
      counts below by 1 accordingly (note it).
 2. Update the in-file unit tests (`#[cfg(test)] mod tests`):
-   - `contains_the_known_lints`: total lint count **14 → 24** (`registry.len()` and `outcomes.len()`);
+   - `contains_the_known_lints`: total lint count **14 → 32** (`registry.len()` and `outcomes.len()`);
      add the new lint ids to the expected-ids list. (NOTE: `sample_cert()` is a CA, so the new BR lints
      and the leaf-only rfc5280 lints are `NotApplicable` but STILL produce one outcome each, so the
-     OUTCOME count equals the lint count = 24.)
+     OUTCOME count equals the lint count = 32.)
    - `rfc5280_source_filter_runs_exactly_the_rfc5280_set`: **6 → 16** outcomes; add the new rfc5280 ids.
    - `cabf_br_source_filter_runs_exactly_the_cabf_br_set`: **4 → 12** outcomes; add the new cabf_br ids;
      assert all are `RuleSource::CabfBr` and none are rfc5280_/hygiene_.
@@ -49,7 +49,7 @@ Does NOT touch `cert.rs`, any `lints/`, `source.rs`, or any fixtures/integration
 ## Acceptance Criteria
 
 - [ ] All new lints registered at the END of their source block; existing order untouched.
-- [ ] Count test 14 → 24; rfc5280 filter 6 → 16; cabf_br filter 4 → 12; hygiene 4 unchanged (or the
+- [ ] Count test 14 → 32; rfc5280 filter 6 → 16; cabf_br filter 4 → 12; hygiene 4 unchanged (or the
       cut-adjusted variants, documented).
 - [ ] All new ids present in the expected-id lists.
 - [ ] `cargo test -p linter registry` green; `cargo clippy --all-targets -- -D warnings` and
@@ -57,4 +57,4 @@ Does NOT touch `cert.rs`, any `lints/`, `source.rs`, or any fixtures/integration
 
 ## Notes / Dependencies
 
-- Depends on tasks 02 and 03. Blocks task 05 (fixtures/integration tests run over the 24-lint registry).
+- Depends on tasks 02 and 03. Blocks task 05 (fixtures/integration tests run over the 32-lint registry).

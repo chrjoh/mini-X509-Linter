@@ -4,16 +4,16 @@ expression: out
 ---
 Certificate 1 (leaf)
 [rfc5280]
-  (3 passed, 3 not applicable)
+  (7 passed, 9 not applicable)
 [cabf_br]
-  (4 passed, 0 not applicable)
+  (12 passed, 0 not applicable)
 [hygiene]
   (3 passed, 1 not applicable)
 OK: no findings
 
 Certificate 2
 [rfc5280]
-  (5 passed, 1 not applicable)
+  (8 passed, 8 not applicable)
 [hygiene]
   (3 passed, 1 not applicable)
 OK: no findings

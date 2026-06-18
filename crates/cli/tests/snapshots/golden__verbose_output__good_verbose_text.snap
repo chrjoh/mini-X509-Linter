@@ -5,15 +5,33 @@ expression: out
 purpose: tls-server (auto)
 [rfc5280]
   n/a   rfc5280_basic_constraints_critical_on_ca
+  n/a   rfc5280_ca_subject_field_empty
+  n/a   rfc5280_ext_authority_key_identifier_no_key_identifier
+  pass  rfc5280_ext_key_usage_without_bits
+  n/a   rfc5280_ext_name_constraints_not_critical
+  pass  rfc5280_ext_san_no_entries
+  n/a   rfc5280_ext_subject_key_identifier_missing_ca
+  pass  rfc5280_ext_subject_key_identifier_missing_sub_cert
   n/a   rfc5280_key_usage_present_when_ca
+  n/a   rfc5280_path_len_constraint_improperly_included
   n/a   rfc5280_san_present_if_subject_empty
   pass  rfc5280_serial_number_positive
+  n/a   rfc5280_subject_dn_country_not_printable_string
+  pass  rfc5280_utc_time_not_in_zulu
   pass  rfc5280_validity_not_after_after_not_before
   pass  rfc5280_version_is_v3
 [cabf_br]
   pass  cabf_br_cn_in_san
+  pass  cabf_br_dnsname_bad_character_in_label
+  pass  cabf_br_dnsname_label_too_long
+  pass  cabf_br_dnsname_underscore_in_sld
+  pass  cabf_br_dnsname_wildcard_left_of_public_suffix
   pass  cabf_br_ext_key_usage_server_auth_present
+  pass  cabf_br_extra_subject_common_names
   pass  cabf_br_no_internal_names_or_reserved_ip
+  pass  cabf_br_organizational_unit_name_prohibited
+  pass  cabf_br_subject_contains_reserved_ip
+  pass  cabf_br_subject_country_not_iso
   pass  cabf_br_validity_max_398_days
 [hygiene]
   n/a   hygiene_ecdsa_curve_allowlist

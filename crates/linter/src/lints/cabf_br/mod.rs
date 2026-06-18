@@ -49,10 +49,26 @@ mod ext_key_usage_server_auth_present;
 mod no_internal_names_or_reserved_ip;
 mod validity_max_398_days;
 
+// Feature 12: BR depth-expansion lints (all broad-scoped, RuleSource::CabfBr).
+mod dnsname_syntax;
+mod extra_subject_common_names;
+mod organizational_unit_name_prohibited;
+mod subject_contains_reserved_ip;
+mod subject_country_not_iso;
+
 pub use cn_in_san::CnInSan;
 pub use ext_key_usage_server_auth_present::ExtKeyUsageServerAuthPresent;
 pub use no_internal_names_or_reserved_ip::NoInternalNamesOrReservedIp;
 pub use validity_max_398_days::ValidityMax398Days;
+
+pub use dnsname_syntax::{
+    DnsnameBadCharacterInLabel, DnsnameLabelTooLong, DnsnameUnderscoreInSld,
+    DnsnameWildcardLeftOfPublicSuffix,
+};
+pub use extra_subject_common_names::ExtraSubjectCommonNames;
+pub use organizational_unit_name_prohibited::OrganizationalUnitNameProhibited;
+pub use subject_contains_reserved_ip::SubjectContainsReservedIp;
+pub use subject_country_not_iso::SubjectCountryNotIso;
 
 use crate::Applicability;
 use crate::cert::Cert;

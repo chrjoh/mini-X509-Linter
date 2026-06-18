@@ -411,3 +411,314 @@ EXT_NOSA="$(new_ext)"
 } >"$EXT_NOSA"
 sign_csr "$HERE/cabf_br_missing_serverauth.pem" "/CN=no-serverauth.example.com" 43 \
   "$BR_OK_NB" "$BR_OK_NA" "$EXT_NOSA"
+
+# ===========================================================================
+# Feature 12: RFC 5280 depth-expansion per-lint violating fixtures
+# ===========================================================================
+#
+# The registry now ships 32 lints (4 hygiene + 16 rfc5280 + 12 cabf_br). Each
+# fixture below violates EXACTLY its one NEW rule across the FULL 32-lint
+# registry and fires no OLD rule under the purpose-gated engine, EXCEPT four
+# fixtures with an INHERENT, documented overlap when the lints are run through
+# the RAW (non-purpose-gated) `default_registry().run()` used by the isolation
+# tests (see the per-fixture notes and the integration tests):
+#   - rfc5280_eku_empty.pem  (an empty EKU asserts no serverAuth, so the broad
+#     cabf_br_ext_key_usage_server_auth_present co-fires under the raw registry;
+#     the purpose-gated engine resolves this non-serverAuth leaf to Generic and
+#     never runs the BR sources)
+#   - cabf_br_dnsname_underscore.pem  (underscore is also a non-LDH character,
+#     so the bad-character lint co-fires by construction)
+#   - cabf_br_dnsname_bare_wildcard.pem  (`*.com` strips to the single label
+#     `com`, which reserved.rs::is_internal_name classifies as internal, so the
+#     internal-name lint co-fires by construction)
+#   - cabf_br_cn_reserved_ip.pem  (an IP CN must appear in the SAN to satisfy
+#     cabf_br_cn_in_san, which trips the existing SAN-reserved-IP lint too)
+#
+# Leaf fixtures reuse BR_OK; CA fixtures reuse the FAR_FUTURE window.
+# Time-fragility is inherited from feature 05 (see the warning at the top).
+
+# rfc5280_ca_subject_field_empty: CA cert with an EMPTY subject DN. To isolate
+# ONLY this rule the CA carries critical BasicConstraints + keyCertSign (so the
+# CA structural lints pass), a hash SKI (so ski_missing_ca passes), and a
+# CRITICAL SAN (RFC 5280 requires the SAN critical when the subject is empty, so
+# san_present_if_subject_empty passes). CA => all BR lints NotApplicable.
+EXT_CA_SUBJ_EMPTY="$(new_ext)"
+{
+  printf 'basicConstraints=critical,CA:TRUE\n'
+  printf 'keyUsage=critical,keyCertSign,cRLSign\n'
+  printf 'subjectKeyIdentifier=hash\n'
+  printf 'subjectAltName=critical,DNS:ca-empty.example.com\n'
+} >"$EXT_CA_SUBJ_EMPTY"
+sign_csr "$HERE/rfc5280_ca_subject_empty.pem" "/" 60 \
+  "$FAR_FUTURE_NB" "$FAR_FUTURE_NA" "$EXT_CA_SUBJ_EMPTY"
+
+# rfc5280_ext_key_usage_without_bits: leaf with an EKU extension present but
+# EMPTY (a zero-length KeyPurposeId SEQUENCE). openssl refuses an empty
+# extendedKeyUsage value, so the extension is injected as raw DER: the EKU OID
+# (2.5.29.37) carrying the DER bytes 30 00 (SEQUENCE, length 0). An empty EKU
+# asserts no serverAuth (see the inherent-overlap note above).
+EXT_EKU_EMPTY="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'subjectAltName=DNS:eku-empty.example.com\n'
+  printf '2.5.29.37=DER:30:00\n'
+} >"$EXT_EKU_EMPTY"
+sign_csr "$HERE/rfc5280_eku_empty.pem" "/CN=eku-empty.example.com" 61 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_EKU_EMPTY"
+
+# rfc5280_aki_no_keyid: leaf whose AuthorityKeyIdentifier carries only
+# authorityCertIssuer (the issuer DirName) and the serial, with NO keyIdentifier
+# field. openssl's `authorityKeyIdentifier=issuer:always` emits exactly that.
+EXT_AKI_NO_KEYID="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:aki-no-keyid.example.com\n'
+  printf 'authorityKeyIdentifier=issuer:always\n'
+} >"$EXT_AKI_NO_KEYID"
+sign_csr "$HERE/rfc5280_aki_no_keyid.pem" "/CN=aki-no-keyid.example.com" 62 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_AKI_NO_KEYID"
+
+# rfc5280_ski_missing_ca: CA cert (critical BC + keyCertSign, non-empty subject)
+# with NO SubjectKeyIdentifier. openssl 3.x auto-adds a hash SKI, so we suppress
+# it explicitly with `subjectKeyIdentifier=none`. CA => all BR lints N/A.
+EXT_SKI_MISSING_CA="$(new_ext)"
+{
+  printf 'basicConstraints=critical,CA:TRUE\n'
+  printf 'keyUsage=critical,keyCertSign,cRLSign\n'
+  printf 'subjectKeyIdentifier=none\n'
+} >"$EXT_SKI_MISSING_CA"
+sign_csr "$HERE/rfc5280_ski_missing_ca.pem" "/CN=ski-missing-ca.example" 63 \
+  "$FAR_FUTURE_NB" "$FAR_FUTURE_NA" "$EXT_SKI_MISSING_CA"
+
+# rfc5280_ski_missing_sub_cert: BR-compliant leaf with NO SubjectKeyIdentifier
+# (suppressed via `subjectKeyIdentifier=none`). This is a SHOULD, so the only
+# finding is a WARN. Everything else passes.
+EXT_SKI_MISSING_SUB="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:ski-sub.example.com\n'
+  printf 'subjectKeyIdentifier=none\n'
+} >"$EXT_SKI_MISSING_SUB"
+sign_csr "$HERE/rfc5280_ski_missing_sub_cert.pem" "/CN=ski-sub.example.com" 64 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_SKI_MISSING_SUB"
+
+# rfc5280_path_len_on_leaf: leaf with a pathLenConstraint set while CA:FALSE —
+# pathLen is only meaningful on a keyCertSign CA, so this is improper. openssl
+# accepts `CA:FALSE,pathlen:0` directly.
+EXT_PATHLEN_LEAF="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE,pathlen:0\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:pathlen-leaf.example.com\n'
+} >"$EXT_PATHLEN_LEAF"
+sign_csr "$HERE/rfc5280_path_len_on_leaf.pem" "/CN=pathlen-leaf.example.com" 65 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_PATHLEN_LEAF"
+
+# rfc5280_name_constraints_not_critical: leaf carrying a NameConstraints
+# extension that is NOT marked critical (RFC 5280 requires it critical). openssl
+# emits NameConstraints non-critical by default.
+EXT_NC="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:nameconstraints.example.com\n'
+  printf 'nameConstraints=permitted;DNS:.example.com\n'
+} >"$EXT_NC"
+sign_csr "$HERE/rfc5280_name_constraints_not_critical.pem" \
+  "/CN=nameconstraints.example.com" 66 "$BR_OK_NB" "$BR_OK_NA" "$EXT_NC"
+
+# rfc5280_country_not_printable: leaf whose subject countryName is encoded as a
+# UTF8String instead of the RFC-mandated PrintableString. openssl always emits
+# countryName as PrintableString (tag 0x13), so we BYTE-PATCH the SUBJECT
+# country value's tag byte from 0x13 (PrintableString) to 0x0c (UTF8String). The
+# value "US" is valid UTF-8, so the cert still parses; only the tag changes. The
+# patch targets the SECOND occurrence of the TLV `13 02 55 53` ("US") in the DER
+# (the first is the self-signed ISSUER country, the second is the SUBJECT
+# country). This length-preserving patch breaks the signature, which is fine —
+# the linter parses structure, it does not verify signatures.
+EXT_COUNTRY="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:country-utf8.example.com\n'
+} >"$EXT_COUNTRY"
+COUNTRY_V3="$(mktemp)"
+COUNTRY_DER="$(mktemp)"
+sign_csr "$COUNTRY_V3" "/C=US/CN=country-utf8.example.com" 67 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_COUNTRY"
+openssl x509 -in "$COUNTRY_V3" -outform DER -out "$COUNTRY_DER"
+python3 - "$COUNTRY_DER" <<'PY'
+import sys
+path = sys.argv[1]
+data = bytearray(open(path, "rb").read())
+pat = bytes.fromhex("13025553")  # PrintableString, len 2, "US"
+first = data.find(pat)
+second = data.find(pat, first + 1)
+if first < 0 or second < 0:
+    sys.exit("ERROR: could not find both issuer+subject country TLVs to patch")
+data[second] = 0x0C  # UTF8String tag on the SUBJECT country value
+open(path, "wb").write(data)
+PY
+openssl x509 -inform DER -in "$COUNTRY_DER" -outform PEM \
+  -out "$HERE/rfc5280_country_not_printable.pem"
+echo "wrote $HERE/rfc5280_country_not_printable.pem (subject C tag patched PrintableString -> UTF8String)"
+rm -f "$COUNTRY_V3" "$COUNTRY_DER"
+
+# rfc5280_san_empty: leaf whose SubjectAltName extension is PRESENT but contains
+# ZERO GeneralNames. openssl's `subjectAltName=email:copy` with a subject that
+# has no email yields an empty SAN. The subject uses /O= (no CN) so cn_in_san
+# stays silent, and the subject is non-empty so san_present_if_subject_empty
+# stays N/A.
+EXT_SAN_EMPTY="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=email:copy\n'
+} >"$EXT_SAN_EMPTY"
+sign_csr "$HERE/rfc5280_san_empty.pem" "/O=SAN Empty Org" 68 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_SAN_EMPTY"
+
+# rfc5280_utctime_not_zulu: leaf whose notBefore UTCTime is in the OFFSET form
+# "YYMMDDHHMMSS+0000" instead of Zulu "YYMMDDHHMMSSZ". openssl always emits the
+# Zulu form, so we rewrite the notBefore UTCTime in the DER from the 13-byte
+# "260601000000Z" to the 17-byte "260601000000+0000" and fix the three nested
+# length headers (Validity SEQUENCE — short form, TBSCertificate SEQUENCE and the
+# outer Certificate SEQUENCE — both two-byte long form). x509-parser accepts the
+# offset form; the lint flags it because it does not end in 'Z'. Signature is
+# intentionally invalidated (irrelevant to a structural linter).
+EXT_UTCTIME="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:utctime.example.com\n'
+} >"$EXT_UTCTIME"
+UTC_V3="$(mktemp)"
+UTC_DER="$(mktemp)"
+sign_csr "$UTC_V3" "/CN=utctime.example.com" 69 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_UTCTIME"
+openssl x509 -in "$UTC_V3" -outform DER -out "$UTC_DER"
+python3 - "$UTC_DER" <<'PY'
+import sys
+path = sys.argv[1]
+data = bytearray(open(path, "rb").read())
+
+# notBefore UTCTime: tag 0x17, length 0x0d (13), content "260601000000Z".
+i = data.find(bytes.fromhex("170d") + b"260601000000Z")
+if i < 0:
+    sys.exit("ERROR: could not locate notBefore UTCTime to patch")
+old_tlv_len = 2 + 13
+new_tlv = b"\x17\x11" + b"260601000000+0000"  # tag, len 17, offset-form content
+data = bytearray(data[:i] + new_tlv + data[i + old_tlv_len:])
+delta = len(new_tlv) - old_tlv_len  # +4
+
+# Fix outer Certificate SEQUENCE length (30 82 hi lo at offset 0).
+if not (data[0] == 0x30 and data[1] == 0x82):
+    sys.exit("ERROR: unexpected Certificate SEQUENCE header")
+cert_len = ((data[2] << 8) | data[3]) + delta
+data[2] = (cert_len >> 8) & 0xFF
+data[3] = cert_len & 0xFF
+
+# Fix TBSCertificate SEQUENCE length (30 82 hi lo at offset 4).
+if not (data[4] == 0x30 and data[5] == 0x82):
+    sys.exit("ERROR: unexpected TBSCertificate SEQUENCE header")
+tbs_len = ((data[6] << 8) | data[7]) + delta
+data[6] = (tbs_len >> 8) & 0xFF
+data[7] = tbs_len & 0xFF
+
+# Fix Validity SEQUENCE length (short-form 30 LL immediately before notBefore).
+j = data.find(b"\x17\x11" + b"260601000000+0000")
+val_hdr = j - 2
+if data[val_hdr] != 0x30:
+    sys.exit("ERROR: unexpected Validity SEQUENCE header")
+data[val_hdr + 1] = data[val_hdr + 1] + delta
+
+open(path, "wb").write(data)
+PY
+openssl x509 -inform DER -in "$UTC_DER" -outform PEM \
+  -out "$HERE/rfc5280_utctime_not_zulu.pem"
+echo "wrote $HERE/rfc5280_utctime_not_zulu.pem (notBefore UTCTime rewritten to offset form)"
+rm -f "$UTC_V3" "$UTC_DER"
+
+# ===========================================================================
+# Feature 12: CA/Browser Forum BR depth-expansion per-lint violating fixtures
+# ===========================================================================
+#
+# All are BR-compliant leaves EXCEPT their one target violation (plus the three
+# documented inherent two-rule overlaps noted at the top of the feature-12
+# section). Each carries serverAuth EKU + a compliant public SAN dNSName + the
+# BR_OK window so the other lints stay quiet.
+
+# cabf_br_dnsname_underscore: SAN with a compliant DNS:<cn> plus the offending
+# DNS:foo_bar.example.com. NOTE (inherent two-rule): an underscore is also a
+# non-LDH character, so cabf_br_dnsname_bad_character_in_label co-fires on the
+# same name by construction. There is no underscore name the LDH check passes,
+# so this fixture intentionally trips BOTH dNSName-syntax rules; the integration
+# test asserts that exact pair.
+EXT_DNS_USCORE="$(new_ext)"
+make_leaf_ext "$EXT_DNS_USCORE" "DNS:underscore.example.com,DNS:foo_bar.example.com"
+sign_csr "$HERE/cabf_br_dnsname_underscore.pem" "/CN=underscore.example.com" 70 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_DNS_USCORE"
+
+# cabf_br_dnsname_bad_char: SAN with a compliant DNS:<cn> plus DNS:foo!bar...
+# ('!' is a non-LDH character, but NOT an underscore, so only the bad-character
+# rule fires).
+EXT_DNS_BADCHAR="$(new_ext)"
+make_leaf_ext "$EXT_DNS_BADCHAR" "DNS:badchar.example.com,DNS:foo!bar.example.com"
+sign_csr "$HERE/cabf_br_dnsname_bad_char.pem" "/CN=badchar.example.com" 71 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_DNS_BADCHAR"
+
+# cabf_br_dnsname_label_too_long: SAN with a compliant DNS:<cn> plus a name whose
+# leftmost label is 64 octets (> the 63-octet DNS limit). The label is all 'a's
+# (LDH), so ONLY the label-too-long rule fires.
+LONG_LABEL="$(python3 -c 'print("a" * 64)')"
+EXT_DNS_TOOLONG="$(new_ext)"
+make_leaf_ext "$EXT_DNS_TOOLONG" "DNS:toolong.example.com,DNS:${LONG_LABEL}.example.com"
+sign_csr "$HERE/cabf_br_dnsname_label_too_long.pem" "/CN=toolong.example.com" 72 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_DNS_TOOLONG"
+
+# cabf_br_dnsname_bare_wildcard: SAN with a compliant DNS:<cn> plus the bare
+# wildcard DNS:*.com. NOTE (inherent two-rule): reserved.rs::is_internal_name
+# strips the leading "*." and judges "com" as a single-label name => internal,
+# so cabf_br_no_internal_names_or_reserved_ip co-fires by construction. Any bare
+# wildcard "*.<tld>" reduces to a single label, so the overlap is unavoidable;
+# the integration test asserts that exact pair.
+EXT_DNS_WILDCARD="$(new_ext)"
+make_leaf_ext "$EXT_DNS_WILDCARD" "DNS:wildcard.example.com,DNS:*.com"
+sign_csr "$HERE/cabf_br_dnsname_bare_wildcard.pem" "/CN=wildcard.example.com" 73 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_DNS_WILDCARD"
+
+# cabf_br_ou_present: BR-compliant leaf whose subject carries a prohibited
+# organizationalUnitName (OU) attribute.
+EXT_OU="$(new_ext)"
+make_leaf_ext "$EXT_OU" "DNS:ou.example.com"
+sign_csr "$HERE/cabf_br_ou_present.pem" "/OU=Engineering/CN=ou.example.com" 74 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_OU"
+
+# cabf_br_cn_reserved_ip: subject CN is the reserved IP 10.0.0.1, present in the
+# SAN as IP:10.0.0.1 so cabf_br_cn_in_san stays quiet. NOTE (inherent two-rule,
+# pre-documented in the plan): putting the reserved IP in the SAN to satisfy
+# cn_in_san necessarily trips the existing cabf_br_no_internal_names_or_reserved_ip
+# (SAN reserved IP). This fixture intentionally trips BOTH reserved-IP rules
+# (CN + SAN); the integration test asserts that exact pair.
+EXT_CN_IP="$(new_ext)"
+make_leaf_ext "$EXT_CN_IP" "IP:10.0.0.1"
+sign_csr "$HERE/cabf_br_cn_reserved_ip.pem" "/CN=10.0.0.1" 75 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_CN_IP"
+
+# cabf_br_two_common_names: subject carries TWO commonName attributes, both
+# present in the SAN so cn_in_san stays quiet — ONLY the extra-CN rule fires.
+EXT_TWO_CN="$(new_ext)"
+make_leaf_ext "$EXT_TWO_CN" "DNS:cn-first.example.com,DNS:cn-second.example.com"
+sign_csr "$HERE/cabf_br_two_common_names.pem" \
+  "/CN=cn-first.example.com/CN=cn-second.example.com" 76 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_TWO_CN"
+
+# cabf_br_country_not_iso: BR-compliant leaf whose subject countryName is "ZZ",
+# which is a valid-length but not-assigned ISO 3166-1 alpha-2 code. ("ZZ" is NOT
+# the explicitly-allowed "XX".)
+EXT_COUNTRY_ISO="$(new_ext)"
+make_leaf_ext "$EXT_COUNTRY_ISO" "DNS:country-iso.example.com"
+sign_csr "$HERE/cabf_br_country_not_iso.pem" "/C=ZZ/CN=country-iso.example.com" 77 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_COUNTRY_ISO"

@@ -10,7 +10,7 @@ scoping (`NotApplicable` on CA, `Applies` on every non-CA leaf, NOT EKU-gated).
 **Central invariant: NO existing fixture is regenerated.** Every new lint either PASSes or is
 `NotApplicable` on the current `good.pem` and all existing leaf fixtures (verified in plan's "good.pem
 Conformance Audit"). The test suite must confirm this — the existing isolation/invariant tests pass
-UNCHANGED over the grown 24-lint registry.
+UNCHANGED over the grown 32-lint registry.
 
 ## Conventions
 
@@ -20,7 +20,7 @@ bytes beyond DER byte-patching.
 
 ## Registry counts (after expansion)
 
-- Total: 14 → **24** (`registry.len()`, `outcomes.len()` on a CA sample cert).
+- Total: 14 → **32** (`registry.len()`, `outcomes.len()` on a CA sample cert).
 - rfc5280 filter: 6 → **16**. cabf_br filter: 4 → **12**. hygiene: **4** (unchanged).
 - (Adjust by −1 per any pre-approved cut, e.g. `rfc5280_utc_time_not_in_zulu`, with the cut documented.)
 
@@ -56,7 +56,7 @@ Each is BR-compliant-except-its-one-target (or a CA where the lint is CA-only), 
 - CA-only new lints (`ca_subject_field_empty`, `ski_missing_ca`, and `path_len_improperly_included`
   when applied to a leaf) report the correct `applies()` result.
 - Extend `each_fixture_isolates_exactly_one_rfc5280_violation` to the new rfc5280 fixtures: each fires
-  exactly its one rule across the 24-lint registry and no BR rule.
+  exactly its one rule across the 32-lint registry and no BR rule.
 
 ### `crates/linter/tests/cabf_br.rs` (extend)
 
@@ -78,7 +78,7 @@ choice in the test.
 
 ## Golden Snapshot (feature 06)
 
-- Regenerate to include the 24-lint outcomes. Existing rows unchanged in order; new rows appended.
+- Regenerate to include the 32-lint outcomes. Existing rows unchanged in order; new rows appended.
 - If regeneration would touch a file outside the tester task's `touches`, FLAG to the architect.
 
 ## Cross-Feature Regression (verify UNCHANGED — must NOT need edits)
@@ -111,7 +111,7 @@ bash testdata/generate.sh
 
 All new RFC + BR lints validated against dedicated openssl fixtures; scoping correct (universal /
 CA-only / extension-present / broad-leaf); each new fixture isolates exactly its one new rule across
-the 24-lint registry (with the one documented `cabf_br_cn_reserved_ip` exception); NO existing fixture
+the 32-lint registry (with the one documented `cabf_br_cn_reserved_ip` exception); NO existing fixture
 regenerated and all existing isolation/invariant tests pass UNCHANGED; registry count/filter unit
-tests updated (24 / 16 / 12 / 4); golden snapshot regenerated; verification commands pass. Any
+tests updated (32 / 16 / 12 / 4); golden snapshot regenerated; verification commands pass. Any
 pre-approved cut (utctime/path-len/country) is documented, not silently faked.

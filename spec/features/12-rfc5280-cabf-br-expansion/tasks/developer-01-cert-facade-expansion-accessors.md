@@ -2,7 +2,7 @@
 agent: developer
 seq: 1
 title: Cert facade accessors for the depth-expansion lints
-status: pending
+status: done
 touches:
   - crates/linter/src/cert.rs
 depends_on: []
