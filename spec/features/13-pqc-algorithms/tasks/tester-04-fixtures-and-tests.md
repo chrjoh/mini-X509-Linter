@@ -2,7 +2,7 @@
 agent: tester
 seq: 4
 title: PQC fixtures (openssl ML-DSA/SLH-DSA) + pqc integration tests + CLI e2e
-status: pending
+status: done
 touches:
   - testdata/generate.sh
   - testdata/pqc_mldsa_good.pem
@@ -15,6 +15,12 @@ touches:
   - crates/linter/tests/pqc.rs
   - crates/linter/tests/registry.rs
   - crates/cli/tests/output.rs
+  - crates/cli/tests/golden.rs
+  - crates/cli/tests/snapshots/golden__text_output__good_text.snap
+  - crates/cli/tests/snapshots/golden__text_output__cabf_br_validity_400_days_text.snap
+  - crates/cli/tests/snapshots/golden__text_output__chain_bundle_text.snap
+  - crates/cli/tests/snapshots/golden__json_output__good_json.snap
+  - crates/cli/tests/snapshots/golden__verbose_output__good_verbose_text.snap
 depends_on:
   - developer-03-register-universal-source-and-cli-wiring
 ---

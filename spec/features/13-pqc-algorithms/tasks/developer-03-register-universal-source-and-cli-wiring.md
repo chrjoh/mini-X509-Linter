@@ -2,7 +2,7 @@
 agent: developer
 seq: 3
 title: Register pqc lints, fold Pqc into ALL purpose source sets (universal source), wire CLI --source/output
-status: pending
+status: done
 touches:
   - crates/linter/src/registry.rs
   - crates/cli/src/main.rs

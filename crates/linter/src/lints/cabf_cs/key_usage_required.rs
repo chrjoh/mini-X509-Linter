@@ -80,7 +80,10 @@ mod tests {
     fn ku(digital_signature: bool) -> KeyUsageView {
         KeyUsageView {
             digital_signature,
+            key_encipherment: false,
+            key_agreement: false,
             key_cert_sign: false,
+            crl_sign: false,
             critical: true,
         }
     }

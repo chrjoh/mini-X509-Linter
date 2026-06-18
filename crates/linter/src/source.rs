@@ -9,14 +9,20 @@ use serde::Serialize;
 /// filter or group findings by the standard they originate from.
 ///
 /// When serialized (with the `serde` feature), variants are rendered in
-/// `snake_case` to match the CLI `--source` vocabulary: `rfc5280`, `cabf_br`,
-/// `cabf_ev`, `cabf_cs`, `cabf_smime`, `hygiene`.
+/// `snake_case` to match the CLI `--source` vocabulary: `rfc5280`, `pqc`,
+/// `cabf_br`, `cabf_ev`, `cabf_cs`, `cabf_smime`, `hygiene`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum RuleSource {
     /// RFC 5280 — the Internet X.509 Public Key Infrastructure certificate profile.
     Rfc5280,
+    /// Post-quantum (ML-DSA / SLH-DSA) signature-algorithm hygiene and structural
+    /// checks — a universal, non-CABF source. Like [`Rfc5280`](RuleSource::Rfc5280)
+    /// and [`Hygiene`](RuleSource::Hygiene) it is folded into every certificate
+    /// purpose's allowed-source set; its lints self-gate on the SPKI algorithm
+    /// being ML-DSA / SLH-DSA, so they stay silent on classical (RSA/EC) keys.
+    Pqc,
     /// CA/Browser Forum Baseline Requirements for publicly-trusted certificates.
     CabfBr,
     /// CA/Browser Forum Extended Validation (EV) Guidelines — the stricter

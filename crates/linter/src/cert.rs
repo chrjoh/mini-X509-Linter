@@ -92,8 +92,20 @@ pub struct KeyUsageView {
     /// `true` if the `digitalSignature` bit (bit 0) is asserted
     /// (RFC 5280 §4.2.1.3).
     pub digital_signature: bool,
-    /// `true` if the `keyCertSign` bit (bit 5) is asserted.
+    /// `true` if the `keyEncipherment` bit (bit 2) is asserted
+    /// (RFC 5280 §4.2.1.3). Consumed by `pqc_key_usage_consistency`: a PQC
+    /// *signature* key MUST NOT assert it.
+    pub key_encipherment: bool,
+    /// `true` if the `keyAgreement` bit (bit 4) is asserted
+    /// (RFC 5280 §4.2.1.3). Consumed by `pqc_key_usage_consistency`: a PQC
+    /// *signature* key MUST NOT assert it.
+    pub key_agreement: bool,
+    /// `true` if the `keyCertSign` bit (bit 5) is asserted
+    /// (RFC 5280 §4.2.1.3).
     pub key_cert_sign: bool,
+    /// `true` if the `cRLSign` bit (bit 6) is asserted (RFC 5280 §4.2.1.3).
+    /// Consumed by `pqc_key_usage_consistency` as the CA-side SHOULD check.
+    pub crl_sign: bool,
     /// `true` if the extension is marked critical.
     pub critical: bool,
 }
@@ -157,6 +169,16 @@ pub struct EkuView {
 /// for [`Ec`](PublicKeyAlg::Ec) keys. Any other algorithm is surfaced as
 /// [`Other`](PublicKeyAlg::Other) carrying the raw SPKI algorithm OID so the
 /// facade never silently discards an unrecognised key type.
+///
+/// The two post-quantum signature families ML-DSA and SLH-DSA are recognised by
+/// their NIST `2.16.840.1.101.3.4.3` "sigAlgs" OID arcs and surfaced as the
+/// [`MlDsa`](PublicKeyAlg::MlDsa) / [`SlhDsa`](PublicKeyAlg::SlhDsa) variants,
+/// each carrying a [`PqcParamSet`] that names the parameter set (or marks an
+/// arc member whose slot is not an assigned parameter set). This is the basis
+/// for the `pqc` lint family's SPKI gate (gate on the *arc*, then let
+/// `pqc_algorithm_known` distinguish a known set from an unassigned slot — see
+/// the feature 13 plan). The `Rsa` / `Ec` / `Other` variants and their
+/// behaviour are unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -165,8 +187,45 @@ pub enum PublicKeyAlg {
     Rsa,
     /// An elliptic-curve public key (`id-ecPublicKey`).
     Ec,
+    /// A Module-Lattice Digital Signature Algorithm (ML-DSA) public key, whose
+    /// SPKI OID lies in the `2.16.840.1.101.3.4.3.{17,18,19}` arc
+    /// (NIST FIPS 204 + the IETF LAMPS ML-DSA X.509 algorithm-identifier
+    /// profile, RFC number TBC). The carried [`PqcParamSet`] names the parameter
+    /// set (`.17`–`.19`) or marks an unassigned arc member.
+    MlDsa(PqcParamSet),
+    /// A Stateless Hash-Based Digital Signature Algorithm (SLH-DSA) public key,
+    /// whose SPKI OID lies in the `2.16.840.1.101.3.4.3.{20..35}` arc
+    /// (NIST FIPS 205 + the IETF LAMPS SLH-DSA X.509 algorithm-identifier
+    /// profile, RFC number TBC). The carried [`PqcParamSet`] names the parameter
+    /// set (`.20`–`.31`) or marks an unassigned arc member (`.32`–`.35`).
+    SlhDsa(PqcParamSet),
     /// Any other algorithm, identified by its SPKI algorithm OID in dotted form.
     Other(String),
+}
+
+/// The parameter-set identity of a post-quantum key recognised by its OID arc.
+///
+/// Carried by [`PublicKeyAlg::MlDsa`] / [`PublicKeyAlg::SlhDsa`]. The gate that
+/// admits the `pqc` lints fires on *any* member of the two PQC arcs (so an
+/// arc-but-unknown OID can still be flagged through the registry); this enum
+/// distinguishes a recognised, named parameter set from an arc member whose slot
+/// is not assigned to a published FIPS 204 / FIPS 205 parameter set.
+///
+/// `pqc_algorithm_known` fires an Error on the [`Unknown`](PqcParamSet::Unknown)
+/// case; the length / key-usage lints treat `Unknown` as "no finding" because
+/// they cannot validate a length or family they do not know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum PqcParamSet {
+    /// A recognised parameter set, named by its canonical FIPS short name
+    /// (e.g. `"ML-DSA-65"`, `"SLH-DSA-SHA2-128s"`).
+    Known(&'static str),
+    /// An OID in the ML-DSA / SLH-DSA arc that does not name an assigned
+    /// parameter set (a reserved-but-unassigned SLH-DSA slot such as `.32`–`.35`,
+    /// or any other member of the arc with no published mapping). Carries the
+    /// full dotted OID for reporting.
+    Unknown(String),
 }
 
 /// Identification of a named elliptic curve from an EC key's SPKI parameters.
@@ -442,7 +501,10 @@ impl Cert {
         self.with_parsed(|c| {
             c.key_usage().ok().flatten().map(|ext| KeyUsageView {
                 digital_signature: ext.value.digital_signature(),
+                key_encipherment: ext.value.key_encipherment(),
+                key_agreement: ext.value.key_agreement(),
                 key_cert_sign: ext.value.key_cert_sign(),
+                crl_sign: ext.value.crl_sign(),
                 critical: ext.critical,
             })
         })
@@ -748,11 +810,23 @@ impl Cert {
         self.with_parsed(|c| oid_name(&c.signature_algorithm.algorithm))
     }
 
-    /// The algorithm family of the subject public key (RSA, EC, or other).
+    /// The algorithm family of the subject public key (RSA, EC, ML-DSA,
+    /// SLH-DSA, or other).
     ///
-    /// Drives the key-strength lints' `applies()` scoping. Unrecognised
-    /// algorithms are returned as [`PublicKeyAlg::Other`] carrying the dotted
-    /// SPKI algorithm OID rather than being treated as an error.
+    /// Drives the key-strength lints' `applies()` scoping and the `pqc` lint
+    /// family's SPKI gate. RSA (`1.2.840.113549.1.1.1`, RFC 8017) and EC
+    /// (`1.2.840.10045.2.1`, RFC 5480) are recognised as before. The two
+    /// post-quantum signature families are recognised by their NIST
+    /// `2.16.840.1.101.3.4.3` "sigAlgs" OID arcs and returned as
+    /// [`PublicKeyAlg::MlDsa`] (`.17`–`.19`, NIST FIPS 204) or
+    /// [`PublicKeyAlg::SlhDsa`] (`.20`–`.35`, NIST FIPS 205), per the IETF LAMPS
+    /// ML-DSA / SLH-DSA X.509 algorithm-identifier profiles (RFC number TBC).
+    /// **Any** member of those two arcs maps to its PQC variant — an arc OID
+    /// whose slot is not an assigned parameter set carries
+    /// [`PqcParamSet::Unknown`], so the gate engages and `pqc_algorithm_known`
+    /// can flag it. Every other algorithm is returned as
+    /// [`PublicKeyAlg::Other`] carrying the dotted SPKI algorithm OID rather
+    /// than being treated as an error.
     ///
     /// # Errors
     ///
@@ -763,12 +837,71 @@ impl Cert {
             let oid = &c.public_key().algorithm.algorithm;
             // RFC 8017 rsaEncryption = 1.2.840.113549.1.1.1
             // RFC 5480 id-ecPublicKey = 1.2.840.10045.2.1
-            match oid.to_string().as_str() {
+            let dotted = oid.to_string();
+            match dotted.as_str() {
                 "1.2.840.113549.1.1.1" => PublicKeyAlg::Rsa,
                 "1.2.840.10045.2.1" => PublicKeyAlg::Ec,
-                other => PublicKeyAlg::Other(other.to_string()),
+                other => classify_pqc_oid(other)
+                    .unwrap_or_else(|| PublicKeyAlg::Other(other.to_string())),
             }
         })
+    }
+
+    /// Whether the subject public key's SPKI `AlgorithmIdentifier` carries a
+    /// `parameters` field.
+    ///
+    /// `AlgorithmIdentifier ::= SEQUENCE { algorithm OBJECT IDENTIFIER,
+    /// parameters ANY DEFINED BY algorithm OPTIONAL }` (RFC 5280 §4.1.1.2).
+    /// Returns `true` iff that OPTIONAL `parameters` field is *present* —
+    /// a present-as-`NULL` parameters value counts as present. Consumed by
+    /// `pqc_spki_parameters_absent`: the IETF LAMPS ML-DSA / SLH-DSA X.509
+    /// algorithm-identifier profiles (FIPS 204 / FIPS 205, RFC number TBC)
+    /// require the `parameters` field to be **absent** for these algorithms.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn spki_algorithm_parameters_present(&self) -> Result<bool, CertError> {
+        self.with_parsed(|c| c.public_key().algorithm.parameters.is_some())
+    }
+
+    /// Whether the certificate's outer `signatureAlgorithm`
+    /// `AlgorithmIdentifier` carries a `parameters` field.
+    ///
+    /// Same presence semantics as
+    /// [`spki_algorithm_parameters_present`](Cert::spki_algorithm_parameters_present)
+    /// (present-as-`NULL` counts as present), applied to the certificate
+    /// signature algorithm rather than the SPKI algorithm. Consumed by
+    /// `pqc_signature_parameters_absent`: the IETF LAMPS ML-DSA / SLH-DSA X.509
+    /// profiles (FIPS 204 / FIPS 205, RFC number TBC) require the signature
+    /// `parameters` field to be **absent** for these algorithms.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn signature_algorithm_parameters_present(&self) -> Result<bool, CertError> {
+        self.with_parsed(|c| c.signature_algorithm.parameters.is_some())
+    }
+
+    /// The byte length of the raw subject public key.
+    ///
+    /// Measures the number of content octets of the SPKI `subjectPublicKey` BIT
+    /// STRING **excluding** the leading unused-bits octet — i.e. the encoded
+    /// public-key bytes themselves. For ML-DSA / SLH-DSA the LAMPS X.509 profile
+    /// defines the public key as exactly these BIT STRING value octets, so this
+    /// length is directly comparable to the parameter-set public-key size from
+    /// FIPS 204 / FIPS 205. (For an RSA or EC SPKI this is still the raw BIT
+    /// STRING value length, which is *not* the modulus / point size; the PQC
+    /// lints only consult it for keys already classified as ML-DSA / SLH-DSA.)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn public_key_raw_len(&self) -> Result<usize, CertError> {
+        self.with_parsed(|c| c.public_key().subject_public_key.data.len())
     }
 
     /// The RSA modulus length in bits, or `None` for non-RSA keys (and for an
@@ -1363,6 +1496,85 @@ impl Cert {
 /// registry, returning `None` when the OID is unknown.
 fn oid_name(oid: &Oid<'_>) -> Option<String> {
     oid2sn(oid, oid_registry()).ok().map(str::to_owned)
+}
+
+/// The shared NIST `2.16.840.1.101.3.4.3` "sigAlgs" arc that prefixes every
+/// ML-DSA / SLH-DSA OID, in dotted form with a trailing dot.
+const PQC_ARC_PREFIX: &str = "2.16.840.1.101.3.4.3.";
+
+/// Classifies a dotted SPKI algorithm OID as an ML-DSA or SLH-DSA key, or
+/// `None` if it is not in either post-quantum OID arc.
+///
+/// Recognises the NIST FIPS 204 ML-DSA arc `2.16.840.1.101.3.4.3.{17,18,19}`
+/// and the FIPS 205 SLH-DSA arc `2.16.840.1.101.3.4.3.{20..35}` (per the IETF
+/// LAMPS ML-DSA / SLH-DSA X.509 algorithm-identifier profiles, RFC number TBC).
+/// An OID that lies in either arc but whose final component is not an assigned
+/// parameter-set slot — the reserved-but-unassigned SLH-DSA slots `.32`–`.35`,
+/// or any other arc member with no published mapping — is still returned as the
+/// matching PQC variant carrying [`PqcParamSet::Unknown`], so the `pqc` gate
+/// engages and `pqc_algorithm_known` can flag it. Anything outside both arcs
+/// yields `None`, leaving `public_key_algorithm()` to fall through to
+/// [`PublicKeyAlg::Other`].
+///
+/// The OID → parameter-set table below was transcribed from FIPS 204 §4 /
+/// FIPS 205 (parameter-set tables) and MUST be re-verified against the published
+/// LAMPS registrations.
+fn classify_pqc_oid(dotted: &str) -> Option<PublicKeyAlg> {
+    // The final arithmetic component after the shared `sigAlgs` arc prefix.
+    let suffix = dotted.strip_prefix(PQC_ARC_PREFIX)?;
+    // The suffix must be a single integer component (no further sub-arc); a
+    // longer OID such as `...3.17.1` is not an assigned PQC algorithm.
+    if suffix.contains('.') {
+        return None;
+    }
+    let slot: u32 = suffix.parse().ok()?;
+
+    // ML-DSA (FIPS 204): .17 ML-DSA-44, .18 ML-DSA-65, .19 ML-DSA-87.
+    let ml_dsa_name = match slot {
+        17 => Some("ML-DSA-44"),
+        18 => Some("ML-DSA-65"),
+        19 => Some("ML-DSA-87"),
+        _ => None,
+    };
+    if (17..=19).contains(&slot) {
+        let params = ml_dsa_name
+            .map(PqcParamSet::Known)
+            .unwrap_or_else(|| PqcParamSet::Unknown(dotted.to_string()));
+        return Some(PublicKeyAlg::MlDsa(params));
+    }
+
+    // SLH-DSA (FIPS 205): the reserved span .20..=.35 (16 slots); .20..=.31 are
+    // the 12 published parameter sets, .32..=.35 are reserved-but-unassigned.
+    if (20..=35).contains(&slot) {
+        let name = slh_dsa_param_set_name(slot);
+        let params = name
+            .map(PqcParamSet::Known)
+            .unwrap_or_else(|| PqcParamSet::Unknown(dotted.to_string()));
+        return Some(PublicKeyAlg::SlhDsa(params));
+    }
+
+    None
+}
+
+/// The canonical FIPS 205 short name for an SLH-DSA OID slot in the
+/// `2.16.840.1.101.3.4.3.{20..31}` published range, or `None` for an
+/// unassigned slot (`.32`–`.35`).
+fn slh_dsa_param_set_name(slot: u32) -> Option<&'static str> {
+    match slot {
+        20 => Some("SLH-DSA-SHA2-128s"),
+        21 => Some("SLH-DSA-SHA2-128f"),
+        22 => Some("SLH-DSA-SHA2-192s"),
+        23 => Some("SLH-DSA-SHA2-192f"),
+        24 => Some("SLH-DSA-SHA2-256s"),
+        25 => Some("SLH-DSA-SHA2-256f"),
+        26 => Some("SLH-DSA-SHAKE-128s"),
+        27 => Some("SLH-DSA-SHAKE-128f"),
+        28 => Some("SLH-DSA-SHAKE-192s"),
+        29 => Some("SLH-DSA-SHAKE-192f"),
+        30 => Some("SLH-DSA-SHAKE-256s"),
+        31 => Some("SLH-DSA-SHAKE-256f"),
+        _ => None,
+    }
 }
 
 /// Converts a SAN `iPAddress` octet string to an [`IpAddr`].
@@ -2111,6 +2323,147 @@ mod tests {
                 vec!["good.example.com".to_string()],
                 "the underlying SAN dNSName is the non-wildcard CN"
             );
+        }
+    }
+
+    mod feature13_pqc_accessors {
+        use super::*;
+
+        /// Loads the workspace `testdata/good.pem` fixture: an RSA-2048 BR-clean
+        /// TLS leaf — the negative/regression case for the PQC additions (it must
+        /// stay `PublicKeyAlg::Rsa`, with a present SPKI parameters field and a
+        /// non-empty raw key, and no PQC reclassification).
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        #[test]
+        fn good_cert_is_still_rsa_not_reclassified_as_pqc() {
+            let cert = good_cert();
+
+            // Regression: the PQC arc additions must not shift an RSA key.
+            assert_eq!(cert.public_key_algorithm().unwrap(), PublicKeyAlg::Rsa);
+        }
+
+        #[test]
+        fn good_cert_rsa_spki_has_present_parameters() {
+            let cert = good_cert();
+
+            // rsaEncryption carries an explicit NULL parameters field, so the
+            // presence predicate reports `true`.
+            assert!(cert.spki_algorithm_parameters_present().unwrap());
+        }
+
+        #[test]
+        fn good_cert_signature_parameters_present_is_readable() {
+            let cert = good_cert();
+
+            // sha256WithRSAEncryption also carries an explicit NULL parameters
+            // field; the accessor returns without panicking.
+            assert!(cert.signature_algorithm_parameters_present().unwrap());
+        }
+
+        #[test]
+        fn good_cert_raw_public_key_len_is_nonzero() {
+            let cert = good_cert();
+
+            // The raw SPKI BIT STRING value (a 2048-bit RSA SPKI SEQUENCE) is far
+            // from empty; we only assert it is read without panicking.
+            assert!(cert.public_key_raw_len().unwrap() > 0);
+        }
+
+        #[test]
+        fn good_cert_key_usage_is_absent_so_no_view() {
+            let cert = good_cert();
+
+            // good.pem has no KeyUsage extension; the new bits are only reachable
+            // through a present view, so there is nothing to read here.
+            assert!(cert.key_usage().unwrap().is_none());
+        }
+    }
+
+    mod classify_pqc_oid {
+        use super::super::{classify_pqc_oid, slh_dsa_param_set_name};
+        use super::{PqcParamSet, PublicKeyAlg};
+
+        #[test]
+        fn ml_dsa_slots_map_to_known_param_sets() {
+            assert_eq!(
+                classify_pqc_oid("2.16.840.1.101.3.4.3.17"),
+                Some(PublicKeyAlg::MlDsa(PqcParamSet::Known("ML-DSA-44")))
+            );
+            assert_eq!(
+                classify_pqc_oid("2.16.840.1.101.3.4.3.18"),
+                Some(PublicKeyAlg::MlDsa(PqcParamSet::Known("ML-DSA-65")))
+            );
+            assert_eq!(
+                classify_pqc_oid("2.16.840.1.101.3.4.3.19"),
+                Some(PublicKeyAlg::MlDsa(PqcParamSet::Known("ML-DSA-87")))
+            );
+        }
+
+        #[test]
+        fn slh_dsa_published_slots_map_to_known_param_sets() {
+            // First and last of the 12 published SLH-DSA parameter sets.
+            assert_eq!(
+                classify_pqc_oid("2.16.840.1.101.3.4.3.20"),
+                Some(PublicKeyAlg::SlhDsa(PqcParamSet::Known(
+                    "SLH-DSA-SHA2-128s"
+                )))
+            );
+            assert_eq!(
+                classify_pqc_oid("2.16.840.1.101.3.4.3.31"),
+                Some(PublicKeyAlg::SlhDsa(PqcParamSet::Known(
+                    "SLH-DSA-SHAKE-256f"
+                )))
+            );
+        }
+
+        #[test]
+        fn slh_dsa_reserved_unassigned_slots_are_unknown_arc_members() {
+            // .32..=.35 lie in the reserved SLH-DSA span but name no published
+            // parameter set: still an SLH-DSA variant, carrying Unknown so the
+            // gate engages and pqc_algorithm_known can flag it.
+            for slot in 32..=35 {
+                let dotted = format!("2.16.840.1.101.3.4.3.{slot}");
+                assert_eq!(
+                    classify_pqc_oid(&dotted),
+                    Some(PublicKeyAlg::SlhDsa(PqcParamSet::Unknown(dotted.clone()))),
+                    "slot .{slot} should be an unknown SLH-DSA arc member"
+                );
+            }
+        }
+
+        #[test]
+        fn oids_outside_both_arcs_are_not_pqc() {
+            // RSA / EC OIDs and a low/high arc neighbour outside .17..=.35.
+            assert_eq!(classify_pqc_oid("1.2.840.113549.1.1.1"), None);
+            assert_eq!(classify_pqc_oid("1.2.840.10045.2.1"), None);
+            assert_eq!(classify_pqc_oid("2.16.840.1.101.3.4.3.16"), None);
+            assert_eq!(classify_pqc_oid("2.16.840.1.101.3.4.3.36"), None);
+        }
+
+        #[test]
+        fn deeper_sub_arc_is_not_a_pqc_algorithm() {
+            // A longer OID under an assigned slot is not itself an algorithm OID.
+            assert_eq!(classify_pqc_oid("2.16.840.1.101.3.4.3.17.1"), None);
+        }
+
+        #[test]
+        fn malformed_arc_suffix_is_not_pqc() {
+            // A non-numeric trailing component cannot be a slot number.
+            assert_eq!(classify_pqc_oid("2.16.840.1.101.3.4.3.xx"), None);
+        }
+
+        #[test]
+        fn slh_dsa_name_table_covers_published_range_only() {
+            assert!(slh_dsa_param_set_name(19).is_none());
+            assert!(slh_dsa_param_set_name(20).is_some());
+            assert!(slh_dsa_param_set_name(31).is_some());
+            assert!(slh_dsa_param_set_name(32).is_none());
         }
     }
 

@@ -2,7 +2,7 @@
 agent: developer
 seq: 2
 title: Add RuleSource::Pqc and implement the PQC-SPKI-gated pqc lints
-status: pending
+status: done
 touches:
   - crates/linter/src/source.rs
   - crates/linter/src/lints/mod.rs

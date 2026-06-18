@@ -252,7 +252,7 @@ The developer finalizes the exact variant shape (task 01) and documents the chos
   - All accessors return `Result<_, CertError>`, never panic on cert data, follow the existing accessor
     style.
 - New source wiring in `crates/linter/src/registry.rs` (task 03):
-  - Register the 5 (or 6) `pqc` lints in `default_registry()` after the `cabf_smime` block (or wherever
+  - Register the 5 `pqc` lints in `default_registry()` after the `cabf_smime` block (or wherever
     keeps the deterministic order with the golden test — append at the end of the existing lint list, in
     a fixed order).
   - **Add `RuleSource::Pqc` to ALL of `tls_server_sources()`, `generic_sources()`,
@@ -261,8 +261,8 @@ The developer finalizes the exact variant shape (task 01) and documents the chos
     untouched.
   - **No new `CertPurpose`.** PQC is not a purpose; it is a universal source. The `auto` resolver,
     `resolve`, and the `CertPurpose` enum are **unchanged**.
-  - Update the in-file unit tests: bump the lint count (52 → 57 off the current baseline, or +6 if the
-    optional lint ships; reconcile to 61-baseline if sibling 11 has landed — see Ripple Flag); add a
+  - Update the in-file unit tests: bump the lint count 61 → 66 (5 pqc lints; sibling 11 cabf_ev had
+    landed before this feature); add a
     `pqc` source-filter test; add tests asserting `Pqc` is present in *every* purpose's
     `allowed_sources` (the universal-source property is itself a test objective). Leave the existing
     rfc5280/cabf_br/cabf_cs/cabf_smime/hygiene filter-count tests unchanged.
@@ -316,7 +316,7 @@ shared files.
 - `src/lints/pqc/key_usage_consistency.rs` (task 02)
 - (optional) `src/lints/pqc/in_unpermitted_profile.rs` — only if the optional advisory lint ships
   (recommended deferred). (task 02)
-- `src/registry.rs` — register the 5 (or 6) `pqc` lints; add `Pqc` to ALL four `*_sources()` helpers;
+- `src/registry.rs` — register the 5 `pqc` lints; add `Pqc` to ALL four `*_sources()` helpers;
   update in-file count/filter unit tests + the universal-source-membership tests. NO `CertPurpose`
   change. (task 03)
 
@@ -451,7 +451,7 @@ lists MUST be reconciled against whatever baseline exists when 13 is implemented
   Hygiene]`.
 - **If 11 HAS landed:** baseline = **61 lints**, sources include `CabfEv` (inserted before `CabfCs`, per
   feature 11's chosen order `Rfc5280, CabfBr, CabfEv, CabfCs, CabfSmime, Hygiene`). After feature 13:
-  **66** (or 67). Place `Pqc` right after `Rfc5280` →
+  **66** (5 pqc lints shipped; the optional 6th was deferred). Place `Pqc` right after `Rfc5280` →
   `[Rfc5280, Pqc, CabfBr, CabfEv, CabfCs, CabfSmime, Hygiene]`.
 
 The implementer reconciles the exact lint count, the `default_registry().len()` assertion, the
@@ -464,7 +464,7 @@ owns the final count.
 - **Batch A:** task 01 (`cert.rs`: `PublicKeyAlg` extension + OID-arc recognition + the three new
   accessors + `KeyUsageView` bit additions). [`crates/linter/src/cert.rs`]
 - **Batch B:** task 02 (`source.rs` `RuleSource::Pqc` + `lints/mod.rs` + `pqc/` module + `params.rs` +
-  the 5 (or 6) lint files). depends_on 01.
+  the 5 lint files). depends_on 01.
 - **Batch C:** task 03 (`registry.rs` register + universal `*_sources()` wiring + count/filter +
   universal-membership unit tests; `cli/main.rs` + `cli/output.rs` wiring). depends_on 02.
 - **Batch D:** task 04 (PQC fixtures + `generate.sh` PQC section + `pqc.rs` tests + CLI e2e +

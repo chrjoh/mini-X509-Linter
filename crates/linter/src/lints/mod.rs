@@ -9,4 +9,5 @@ pub mod cabf_cs;
 pub mod cabf_ev;
 pub mod cabf_smime;
 pub mod hygiene;
+pub mod pqc;
 pub mod rfc5280;

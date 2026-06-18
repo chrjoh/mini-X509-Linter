@@ -5,6 +5,8 @@ expression: out
 Certificate 1 (leaf)
 [rfc5280]
   (7 passed, 9 not applicable)
+[pqc]
+  (0 passed, 5 not applicable)
 [cabf_br]
   (12 passed, 0 not applicable)
 [cabf_ev]
@@ -16,6 +18,8 @@ OK: no findings
 Certificate 2
 [rfc5280]
   (8 passed, 8 not applicable)
+[pqc]
+  (0 passed, 5 not applicable)
 [hygiene]
   (3 passed, 1 not applicable)
 OK: no findings

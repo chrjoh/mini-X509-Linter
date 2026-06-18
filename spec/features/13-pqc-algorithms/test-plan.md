@@ -81,10 +81,9 @@ Producibility caveats (tester owns the decision, like prior features):
 
 ### `registry.rs` (task 03)
 
-- `contains_the_known_lints`: lint count and outcome count bumped to the then-current baseline (52 → 57,
-  or +6 if the optional lint ships; 61 → 66 if sibling 11 has landed — state the chosen baseline); the
-  5 (or 6) `pqc_*` ids present.
-- `pqc_source_filter_runs_exactly_the_pqc_set`: `run_filtered(&cert, &[RuleSource::Pqc])` → 5 (or 6)
+- `contains_the_known_lints`: lint count and outcome count bumped 61 → 66 (5 pqc lints; sibling 11
+  cabf_ev had landed before this feature); the 5 `pqc_*` ids present.
+- `pqc_source_filter_runs_exactly_the_pqc_set`: `run_filtered(&cert, &[RuleSource::Pqc])` → 5
   outcomes, all `RuleSource::Pqc`, the `pqc_*` ids, none rfc5280_/hygiene_/cabf_*.
 - **Universal-source membership** (the headline property): `allowed_sources` for `TlsServer`, `Generic`,
   `CodeSigning`, `Smime` (and an `auto` resolving to each) ALL include `RuleSource::Pqc`. Assert
@@ -110,7 +109,7 @@ Producibility caveats (tester owns the decision, like prior features):
   case is not producible.
 - **Scoping:** all PQC lints are `NotApplicable` on a non-PQC cert (use `good.pem`); all PQC lints
   `Applies` on `pqc_mldsa_good.pem` and `pqc_slhdsa_good.pem`.
-- **No-cascade (load-bearing):** `default_registry().run()` on `good.pem` yields 5 (or 6) `pqc` outcomes
+- **No-cascade (load-bearing):** `default_registry().run()` on `good.pem` yields 5 `pqc` outcomes
   all `NotApplicable` with empty findings. Symmetrically: on `pqc_mldsa_good.pem`, the hygiene
   key-strength lints (`hygiene_rsa_key_min_2048`, `hygiene_ecdsa_curve_allowlist`) are `NotApplicable`
   (PQC key is neither RSA nor EC) — assert this so the PQC key does not trip the RSA/EC hygiene checks.
@@ -119,7 +118,7 @@ Producibility caveats (tester owns the decision, like prior features):
 
 ## CLI E2E (`crates/cli/tests/output.rs`, ADD only)
 
-- `--source pqc` on `pqc_mldsa_good.pem` → `[pqc]` group with the 5 (or 6) PQC lints, all
+- `--source pqc` on `pqc_mldsa_good.pem` → `[pqc]` group with the 5 PQC lints, all
   applicable/passed. Confirm the `[pqc]` group renders in the documented `SOURCE_ORDER` position
   (after `[rfc5280]`).
 - `--source pqc` on a non-PQC cert (`good.pem`) → the `[pqc]` group shows the PQC lints all
@@ -165,7 +164,7 @@ bash testdata/generate.sh
 
 ## Exit Criteria
 
-The 5 (or 6) `pqc` lints + facade work + the universal `RuleSource::Pqc` source + CLI wiring are
+The 5 `pqc` lints + facade work + the universal `RuleSource::Pqc` source + CLI wiring are
 validated; the universal-source-membership property is proven (Pqc in every purpose's allowed-sources);
 the PQC-SPKI-gate scoping is confirmed; both clean PQC leaves pass the pqc set; each violating (or
 direct-invocation) case isolates its one PQC rule; the no-cascade property is proven in BOTH directions

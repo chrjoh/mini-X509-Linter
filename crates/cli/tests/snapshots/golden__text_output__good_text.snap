@@ -4,6 +4,8 @@ expression: out
 ---
 [rfc5280]
   (7 passed, 9 not applicable)
+[pqc]
+  (0 passed, 5 not applicable)
 [cabf_br]
   (12 passed, 0 not applicable)
 [cabf_ev]

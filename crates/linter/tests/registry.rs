@@ -365,12 +365,13 @@ mod run_filtered {
 mod default_registry_engine {
     use super::*;
 
-    /// The shipped default registry wires up the full lint set across all six
-    /// sources. The authoritative count is **61** (4 hygiene + 16 rfc5280 +
-    /// 12 cabf_br + 9 cabf_ev + 8 cabf_cs + 12 cabf_smime), the cross-feature
-    /// reconciliation point with siblings 09/10/12. Feature 11 added the nine
-    /// `cabf_ev_*` lints. Bump this (and the in-file count in
-    /// `src/registry.rs`) when a new rule set lands.
+    /// The shipped default registry wires up the full lint set across all seven
+    /// sources. The authoritative count is **66** (4 hygiene + 16 rfc5280 +
+    /// 12 cabf_br + 9 cabf_ev + 8 cabf_cs + 12 cabf_smime + 5 pqc), the
+    /// cross-feature reconciliation point with siblings 09/10/11/12. Feature 13
+    /// added the five universal `pqc_*` lints (verified against the in-file count
+    /// in `src/registry.rs`). Bump this (and the in-file count) when a new rule
+    /// set lands.
     #[test]
     fn default_registry_has_the_expected_total_lint_count() {
         // Setup & Invoke
@@ -378,9 +379,9 @@ mod default_registry_engine {
         let cert = load_leaf(EXPIRED_PEM);
         let outcomes = registry.run(&cert);
 
-        // Expect: one outcome per registered lint, 61 in total.
-        assert_eq!(registry.len(), 61);
-        assert_eq!(outcomes.len(), 61);
+        // Expect: one outcome per registered lint, 66 in total.
+        assert_eq!(registry.len(), 66);
+        assert_eq!(outcomes.len(), 66);
     }
 
     /// (d) The shipped default registry contains the `hygiene_not_expired` lint,

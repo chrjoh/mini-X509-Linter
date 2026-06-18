@@ -4,6 +4,8 @@ expression: out
 ---
 [rfc5280]
   (7 passed, 9 not applicable)
+[pqc]
+  (0 passed, 5 not applicable)
 [cabf_br]
   error [cabf_br_validity_max_398_days] validity window is 400 days; CA/Browser Forum BR §6.3.2 allows at most 398 days for a subscriber certificate
   (11 passed, 0 not applicable)

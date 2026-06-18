@@ -161,8 +161,13 @@ pub enum CertPurpose {
 ///
 /// Both [`CertPurpose::TlsServer`] and an `Auto` purpose that resolves to
 /// tls-server return this exact set, so the two paths stay in sync. Ordering is
-/// fixed (`Rfc5280, Hygiene, CabfBr, CabfEv`) for deterministic downstream
+/// fixed (`Rfc5280, Pqc, Hygiene, CabfBr, CabfEv`) for deterministic downstream
 /// output.
+///
+/// [`RuleSource::Pqc`] is a **universal** source (like [`RuleSource::Rfc5280`]
+/// and [`RuleSource::Hygiene`]): it is in every purpose's set. Its lints
+/// self-gate on the SPKI algorithm being ML-DSA / SLH-DSA, so a classical
+/// (RSA/EC) leaf sees every `pqc_*` lint as `NotApplicable`.
 ///
 /// [`RuleSource::CabfEv`] (the EV Guidelines) folds into this set rather than a
 /// dedicated purpose: EV is the stricter sub-profile of tls-server (EV ⊂ BR ⊂
@@ -173,20 +178,23 @@ pub enum CertPurpose {
 fn tls_server_sources() -> Vec<RuleSource> {
     vec![
         RuleSource::Rfc5280,
+        RuleSource::Pqc,
         RuleSource::Hygiene,
         RuleSource::CabfBr,
         RuleSource::CabfEv,
     ]
 }
 
-/// The allowed-source set for a non-TLS-server certificate: standard and
-/// hygiene only, skipping the TLS-server-specific [`RuleSource::CabfBr`].
+/// The allowed-source set for a non-TLS-server certificate: standard, universal
+/// PQC, and hygiene only, skipping the TLS-server-specific [`RuleSource::CabfBr`].
 ///
 /// Both [`CertPurpose::Generic`] and an `Auto` purpose that resolves to generic
 /// (including the fail-closed error path) return this exact set. Ordering is
-/// fixed (`Rfc5280, Hygiene`) for deterministic downstream output.
+/// fixed (`Rfc5280, Pqc, Hygiene`) for deterministic downstream output. The
+/// universal [`RuleSource::Pqc`] lints self-gate on a PQC SPKI algorithm, so they
+/// are `NotApplicable` on a classical (RSA/EC) leaf.
 fn generic_sources() -> Vec<RuleSource> {
-    vec![RuleSource::Rfc5280, RuleSource::Hygiene]
+    vec![RuleSource::Rfc5280, RuleSource::Pqc, RuleSource::Hygiene]
 }
 
 /// The allowed-source set for a code-signing certificate: standard, hygiene, and
@@ -194,9 +202,16 @@ fn generic_sources() -> Vec<RuleSource> {
 ///
 /// Both [`CertPurpose::CodeSigning`] and an `Auto` purpose that resolves to
 /// code-signing return this exact set, so the two paths stay in sync. Ordering
-/// is fixed (`Rfc5280, Hygiene, CabfCs`) for deterministic downstream output.
+/// is fixed (`Rfc5280, Pqc, Hygiene, CabfCs`) for deterministic downstream
+/// output. The universal [`RuleSource::Pqc`] lints self-gate on a PQC SPKI
+/// algorithm, so they are `NotApplicable` on a classical (RSA/EC) leaf.
 fn code_signing_sources() -> Vec<RuleSource> {
-    vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfCs]
+    vec![
+        RuleSource::Rfc5280,
+        RuleSource::Pqc,
+        RuleSource::Hygiene,
+        RuleSource::CabfCs,
+    ]
 }
 
 /// The allowed-source set for an S/MIME certificate: standard, hygiene, and the
@@ -204,10 +219,13 @@ fn code_signing_sources() -> Vec<RuleSource> {
 ///
 /// Both [`CertPurpose::Smime`] and an `Auto` purpose that resolves to S/MIME
 /// return this exact set, so the two paths stay in sync. Ordering is fixed
-/// (`Rfc5280, Hygiene, CabfSmime`) for deterministic downstream output.
+/// (`Rfc5280, Pqc, Hygiene, CabfSmime`) for deterministic downstream output. The
+/// universal [`RuleSource::Pqc`] lints self-gate on a PQC SPKI algorithm, so they
+/// are `NotApplicable` on a classical (RSA/EC) leaf.
 fn smime_sources() -> Vec<RuleSource> {
     vec![
         RuleSource::Rfc5280,
+        RuleSource::Pqc,
         RuleSource::Hygiene,
         RuleSource::CabfSmime,
     ]
@@ -273,15 +291,21 @@ fn auto_sources_from(
 impl CertPurpose {
     /// The set of [`RuleSource`]s this purpose allows for `cert`.
     ///
-    /// The returned ordering is stable (always `Rfc5280, Hygiene, CabfBr, CabfEv`
-    /// for the tls-server set; `Rfc5280, Hygiene` for the generic set) so
-    /// downstream output stays deterministic. The CLI intersects this set with its
-    /// `--source` selection and passes the result to [`Registry::run_filtered`].
+    /// The returned ordering is stable (always
+    /// `Rfc5280, Pqc, Hygiene, CabfBr, CabfEv` for the tls-server set;
+    /// `Rfc5280, Pqc, Hygiene` for the generic set) so downstream output stays
+    /// deterministic. The CLI intersects this set with its `--source` selection
+    /// and passes the result to [`Registry::run_filtered`].
     ///
-    /// - [`TlsServer`](CertPurpose::TlsServer) → `[Rfc5280, Hygiene, CabfBr, CabfEv]`.
-    /// - [`CodeSigning`](CertPurpose::CodeSigning) → `[Rfc5280, Hygiene, CabfCs]`.
-    /// - [`Smime`](CertPurpose::Smime) → `[Rfc5280, Hygiene, CabfSmime]`.
-    /// - [`Generic`](CertPurpose::Generic) → `[Rfc5280, Hygiene]`.
+    /// [`RuleSource::Pqc`] is a **universal** source (like
+    /// [`RuleSource::Rfc5280`] and [`RuleSource::Hygiene`]): it is present in every
+    /// purpose's set, in contrast to the purpose-specific `CabfBr` / `CabfEv` /
+    /// `CabfCs` / `CabfSmime` sets. Its lints self-gate on a PQC SPKI algorithm.
+    ///
+    /// - [`TlsServer`](CertPurpose::TlsServer) → `[Rfc5280, Pqc, Hygiene, CabfBr, CabfEv]`.
+    /// - [`CodeSigning`](CertPurpose::CodeSigning) → `[Rfc5280, Pqc, Hygiene, CabfCs]`.
+    /// - [`Smime`](CertPurpose::Smime) → `[Rfc5280, Pqc, Hygiene, CabfSmime]`.
+    /// - [`Generic`](CertPurpose::Generic) → `[Rfc5280, Pqc, Hygiene]`.
     /// - [`Auto`](CertPurpose::Auto) → resolved per cert from its EKU with a
     ///   fixed precedence (codeSigning first, then serverAuth, then
     ///   emailProtection, else generic): codeSigning yields the code-signing set,
@@ -376,6 +400,7 @@ pub fn default_registry() -> Registry {
     use crate::lints::cabf_ev;
     use crate::lints::cabf_smime;
     use crate::lints::hygiene;
+    use crate::lints::pqc;
     use crate::lints::rfc5280;
 
     Registry::with_lints(vec![
@@ -408,6 +433,20 @@ pub fn default_registry() -> Registry {
         Box::new(rfc5280::SubjectDnCountryNotPrintableString::new()),
         Box::new(rfc5280::ExtSanNoEntries::new()),
         Box::new(rfc5280::UtcTimeNotInZulu::new()),
+        // Post-quantum (ML-DSA / SLH-DSA) signature-algorithm hygiene lints
+        // (feature 13). Appended after the rfc5280 block and before the cabf_br
+        // block, mirroring the SOURCE_ORDER position (Pqc directly after Rfc5280,
+        // grouping the two universal structural sources). Order matches the plan's
+        // lint table and is deterministic — it matters for the feature 06 golden
+        // test, so keep it stable. `RuleSource::Pqc` is a UNIVERSAL source (folded
+        // into every purpose's allowed-source set), but each lint self-gates on the
+        // SPKI algorithm being ML-DSA / SLH-DSA, so all five are NotApplicable on
+        // every classical (RSA / EC) leaf.
+        Box::new(pqc::AlgorithmKnown::new()),
+        Box::new(pqc::SpkiParametersAbsent::new()),
+        Box::new(pqc::SignatureParametersAbsent::new()),
+        Box::new(pqc::PublicKeyLength::new()),
+        Box::new(pqc::KeyUsageConsistency::new()),
         // CA/Browser Forum Baseline Requirements lints (feature 05). Order is
         // deterministic and matters for the feature 06 golden test — keep it
         // stable.
@@ -796,18 +835,21 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             let cert = sample_cert();
             let outcomes = registry.run(&cert);
 
-            // Expect: the four hygiene lints, all sixteen RFC 5280 lints, the
-            // twelve CA/Browser Forum BR lints, the nine CA/Browser Forum EV lints,
-            // the eight CA/Browser Forum Code-Signing lints, and the twelve
-            // CA/Browser Forum S/MIME lints are wired in and reported — one outcome
-            // per registered lint. `sample_cert()` is a self-signed CA with no
-            // codeSigning or emailProtection EKU and no EV policy OID, so the
-            // BR/EV/CS/SMIME lints and leaf-only rfc5280 lints are `NotApplicable`
-            // but still produce one outcome each, keeping the outcome count equal to
-            // the registry length.
+            // Expect: the four hygiene lints, all sixteen RFC 5280 lints, the five
+            // post-quantum (Pqc) lints, the twelve CA/Browser Forum BR lints, the
+            // nine CA/Browser Forum EV lints, the eight CA/Browser Forum
+            // Code-Signing lints, and the twelve CA/Browser Forum S/MIME lints are
+            // wired in and reported — one outcome per registered lint. Baseline
+            // chosen at integration time: sibling feature 11 (cabf_ev) HAS landed,
+            // so the pre-pqc baseline is 61; adding the five pqc lints makes it 66.
+            // `sample_cert()` is a self-signed RSA CA with no codeSigning or
+            // emailProtection EKU, no EV policy OID, and a classical (RSA) key, so
+            // the BR/EV/CS/SMIME lints, the leaf-only rfc5280 lints, and the
+            // SPKI-self-gated pqc lints are `NotApplicable` but still produce one
+            // outcome each, keeping the outcome count equal to the registry length.
             assert!(!registry.is_empty());
-            assert_eq!(registry.len(), 61);
-            assert_eq!(outcomes.len(), 61);
+            assert_eq!(registry.len(), 66);
+            assert_eq!(outcomes.len(), 66);
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
             for expected in [
@@ -831,6 +873,11 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "rfc5280_subject_dn_country_not_printable_string",
                 "rfc5280_ext_san_no_entries",
                 "rfc5280_utc_time_not_in_zulu",
+                "pqc_algorithm_known",
+                "pqc_spki_parameters_absent",
+                "pqc_signature_parameters_absent",
+                "pqc_public_key_length",
+                "pqc_key_usage_consistency",
                 "cabf_br_validity_max_398_days",
                 "cabf_br_cn_in_san",
                 "cabf_br_no_internal_names_or_reserved_ip",
@@ -920,6 +967,40 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             assert!(!ids.contains(&"hygiene_no_sha1_signature"));
             assert!(!ids.contains(&"hygiene_rsa_key_min_2048"));
             assert!(!ids.contains(&"hygiene_ecdsa_curve_allowlist"));
+        }
+
+        #[test]
+        fn pqc_source_filter_runs_exactly_the_pqc_set() {
+            // Setup & Invoke: filtering by RuleSource::Pqc must select the five
+            // post-quantum lints and nothing else (no RFC 5280, hygiene, or cabf_*
+            // lints). Filtering is by source, before applicability, so the pqc lints
+            // appear even though `sample_cert()` carries a classical (RSA) key —
+            // they are NotApplicable (self-gated on a PQC SPKI algorithm) but still
+            // emitted as outcomes.
+            let registry = default_registry();
+            let cert = sample_cert();
+            let outcomes = registry.run_filtered(&cert, &[RuleSource::Pqc]);
+
+            // Expect
+            assert_eq!(outcomes.len(), 5);
+            assert!(outcomes.iter().all(|o| o.source == RuleSource::Pqc));
+
+            let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
+            for expected in [
+                "pqc_algorithm_known",
+                "pqc_spki_parameters_absent",
+                "pqc_signature_parameters_absent",
+                "pqc_public_key_length",
+                "pqc_key_usage_consistency",
+            ] {
+                assert!(
+                    ids.contains(&expected),
+                    "pqc filter missing lint {expected}; got {ids:?}"
+                );
+            }
+            assert!(!ids.iter().any(|id| id.starts_with("rfc5280_")));
+            assert!(!ids.iter().any(|id| id.starts_with("hygiene_")));
+            assert!(!ids.iter().any(|id| id.starts_with("cabf_")));
         }
 
         #[test]
@@ -1132,11 +1213,13 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             // Invoke
             let sources = CertPurpose::TlsServer.allowed_sources(&cert);
 
-            // Expect: the tls-server set, stable order, CabfBr and CabfEv present.
+            // Expect: the tls-server set, stable order, Pqc, CabfBr and CabfEv
+            // present (Pqc is the universal source folded into every purpose).
             assert_eq!(
                 sources,
                 vec![
                     RuleSource::Rfc5280,
+                    RuleSource::Pqc,
                     RuleSource::Hygiene,
                     RuleSource::CabfBr,
                     RuleSource::CabfEv
@@ -1144,6 +1227,7 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             );
             assert!(sources.contains(&RuleSource::CabfBr));
             assert!(sources.contains(&RuleSource::CabfEv));
+            assert!(sources.contains(&RuleSource::Pqc));
         }
 
         #[test]
@@ -1154,9 +1238,13 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             // Invoke
             let sources = CertPurpose::Generic.allowed_sources(&cert);
 
-            // Expect: only standard + hygiene, no CabfBr.
-            assert_eq!(sources, vec![RuleSource::Rfc5280, RuleSource::Hygiene]);
+            // Expect: standard + universal Pqc + hygiene, no CabfBr.
+            assert_eq!(
+                sources,
+                vec![RuleSource::Rfc5280, RuleSource::Pqc, RuleSource::Hygiene]
+            );
             assert!(!sources.contains(&RuleSource::CabfBr));
+            assert!(sources.contains(&RuleSource::Pqc));
         }
 
         #[test]
@@ -1171,11 +1259,12 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             // Invoke
             let sources = CertPurpose::Auto.allowed_sources(&cert);
 
-            // Expect: resolves to the tls-server set incl. CabfBr and CabfEv.
+            // Expect: resolves to the tls-server set incl. Pqc, CabfBr and CabfEv.
             assert_eq!(
                 sources,
                 vec![
                     RuleSource::Rfc5280,
+                    RuleSource::Pqc,
                     RuleSource::Hygiene,
                     RuleSource::CabfBr,
                     RuleSource::CabfEv
@@ -1191,7 +1280,11 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             // helper so no fixture is required (task 04 adds one later).
             let sources = auto_sources_from(Ok(false), Ok(false), Ok(false));
 
-            assert_eq!(sources, vec![RuleSource::Rfc5280, RuleSource::Hygiene]);
+            assert_eq!(
+                sources,
+                vec![RuleSource::Rfc5280, RuleSource::Pqc, RuleSource::Hygiene]
+            );
+            assert!(sources.contains(&RuleSource::Pqc));
             assert!(!sources.contains(&RuleSource::CabfBr));
             assert!(!sources.contains(&RuleSource::CabfCs));
             assert!(!sources.contains(&RuleSource::CabfSmime));
@@ -1208,7 +1301,11 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 Err(CertError::Der),
             );
 
-            assert_eq!(sources, vec![RuleSource::Rfc5280, RuleSource::Hygiene]);
+            assert_eq!(
+                sources,
+                vec![RuleSource::Rfc5280, RuleSource::Pqc, RuleSource::Hygiene]
+            );
+            assert!(sources.contains(&RuleSource::Pqc));
             assert!(!sources.contains(&RuleSource::CabfBr));
             assert!(!sources.contains(&RuleSource::CabfCs));
             assert!(!sources.contains(&RuleSource::CabfSmime));
@@ -1222,12 +1319,19 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             // Invoke
             let sources = CertPurpose::CodeSigning.allowed_sources(&cert);
 
-            // Expect: standard + hygiene + CabfCs, stable order, no CabfBr.
+            // Expect: standard + universal Pqc + hygiene + CabfCs, stable order,
+            // no CabfBr.
             assert_eq!(
                 sources,
-                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfCs]
+                vec![
+                    RuleSource::Rfc5280,
+                    RuleSource::Pqc,
+                    RuleSource::Hygiene,
+                    RuleSource::CabfCs
+                ]
             );
             assert!(sources.contains(&RuleSource::CabfCs));
+            assert!(sources.contains(&RuleSource::Pqc));
             assert!(!sources.contains(&RuleSource::CabfBr));
         }
 
@@ -1249,7 +1353,12 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
 
             assert_eq!(
                 sources,
-                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfCs]
+                vec![
+                    RuleSource::Rfc5280,
+                    RuleSource::Pqc,
+                    RuleSource::Hygiene,
+                    RuleSource::CabfCs
+                ]
             );
             assert_eq!(
                 auto_purpose_from(Ok(true), Ok(false), Ok(false)),
@@ -1267,7 +1376,12 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             );
             assert_eq!(
                 auto_sources_from(Ok(true), Ok(true), Ok(false)),
-                vec![RuleSource::Rfc5280, RuleSource::Hygiene, RuleSource::CabfCs]
+                vec![
+                    RuleSource::Rfc5280,
+                    RuleSource::Pqc,
+                    RuleSource::Hygiene,
+                    RuleSource::CabfCs
+                ]
             );
         }
 
@@ -1282,6 +1396,7 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 auto_sources_from(Ok(false), Ok(true), Ok(false)),
                 vec![
                     RuleSource::Rfc5280,
+                    RuleSource::Pqc,
                     RuleSource::Hygiene,
                     RuleSource::CabfBr,
                     RuleSource::CabfEv
@@ -1307,16 +1422,19 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             // Invoke
             let sources = CertPurpose::Smime.allowed_sources(&cert);
 
-            // Expect: standard + hygiene + CabfSmime, stable order, no CabfBr/CabfCs.
+            // Expect: standard + universal Pqc + hygiene + CabfSmime, stable order,
+            // no CabfBr/CabfCs.
             assert_eq!(
                 sources,
                 vec![
                     RuleSource::Rfc5280,
+                    RuleSource::Pqc,
                     RuleSource::Hygiene,
                     RuleSource::CabfSmime
                 ]
             );
             assert!(sources.contains(&RuleSource::CabfSmime));
+            assert!(sources.contains(&RuleSource::Pqc));
             assert!(!sources.contains(&RuleSource::CabfBr));
             assert!(!sources.contains(&RuleSource::CabfCs));
         }
@@ -1338,6 +1456,7 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 sources,
                 vec![
                     RuleSource::Rfc5280,
+                    RuleSource::Pqc,
                     RuleSource::Hygiene,
                     RuleSource::CabfSmime
                 ]
@@ -1360,6 +1479,7 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 auto_sources_from(Ok(false), Ok(true), Ok(true)),
                 vec![
                     RuleSource::Rfc5280,
+                    RuleSource::Pqc,
                     RuleSource::Hygiene,
                     RuleSource::CabfBr,
                     RuleSource::CabfEv
@@ -1387,7 +1507,7 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             );
             assert_eq!(
                 auto_sources_from(Ok(false), Ok(false), Err(CertError::Der)),
-                vec![RuleSource::Rfc5280, RuleSource::Hygiene]
+                vec![RuleSource::Rfc5280, RuleSource::Pqc, RuleSource::Hygiene]
             );
         }
 

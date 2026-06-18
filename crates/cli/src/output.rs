@@ -19,8 +19,9 @@ use linter::{Applicability, Finding, LintOutcome, RuleSource, Severity};
 ///
 /// Listing the sources explicitly (rather than deriving order from the input)
 /// keeps text output stable regardless of registry ordering.
-const SOURCE_ORDER: [RuleSource; 6] = [
+const SOURCE_ORDER: [RuleSource; 7] = [
     RuleSource::Rfc5280,
+    RuleSource::Pqc,
     RuleSource::CabfBr,
     RuleSource::CabfEv,
     RuleSource::CabfCs,
@@ -155,6 +156,7 @@ pub fn severity_counts(outcomes: &[LintOutcome], min: Severity) -> SeverityCount
 fn source_label(source: RuleSource) -> &'static str {
     match source {
         RuleSource::Rfc5280 => "rfc5280",
+        RuleSource::Pqc => "pqc",
         RuleSource::CabfBr => "cabf_br",
         RuleSource::CabfEv => "cabf_ev",
         RuleSource::CabfCs => "cabf_cs",

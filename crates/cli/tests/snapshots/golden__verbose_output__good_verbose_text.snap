@@ -20,6 +20,12 @@ purpose: tls-server (auto)
   pass  rfc5280_utc_time_not_in_zulu
   pass  rfc5280_validity_not_after_after_not_before
   pass  rfc5280_version_is_v3
+[pqc]
+  n/a   pqc_algorithm_known
+  n/a   pqc_key_usage_consistency
+  n/a   pqc_public_key_length
+  n/a   pqc_signature_parameters_absent
+  n/a   pqc_spki_parameters_absent
 [cabf_br]
   pass  cabf_br_cn_in_san
   pass  cabf_br_dnsname_bad_character_in_label

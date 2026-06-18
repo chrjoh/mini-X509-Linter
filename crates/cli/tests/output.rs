@@ -570,6 +570,211 @@ mod code_signing_output {
     }
 }
 
+mod pqc_output {
+    use super::*;
+
+    /// The five `pqc` lint ids the post-quantum group must list (feature 13).
+    const PQC_LINT_IDS: [&str; 5] = [
+        "pqc_algorithm_known",
+        "pqc_spki_parameters_absent",
+        "pqc_signature_parameters_absent",
+        "pqc_public_key_length",
+        "pqc_key_usage_consistency",
+    ];
+
+    /// `--source pqc --verbose` on the clean ML-DSA leaf renders the `[pqc]`
+    /// group with all five PQC lints applying and passing, and no other source
+    /// group. Proves the `--source pqc` token plumbing end-to-end on a PQC cert.
+    #[test]
+    fn source_pqc_on_mldsa_good_runs_only_the_pqc_group() {
+        // Setup + Invoke.
+        let output = run(&[
+            "--source",
+            "pqc",
+            "--verbose",
+            fixture("pqc_mldsa_good.pem").to_str().unwrap(),
+        ]);
+
+        // Find.
+        let stdout = stdout_of(&output);
+
+        // Expect: clean exit, the pqc group present with all five lints passing,
+        // and no other source group rendered.
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            stdout.contains("[pqc]"),
+            "missing pqc group header:\n{stdout}"
+        );
+        for id in PQC_LINT_IDS {
+            assert!(
+                stdout.contains(&format!("pass  {id}")),
+                "pqc lint {id} should be listed as passed:\n{stdout}"
+            );
+        }
+        assert!(
+            !stdout.contains("[rfc5280]"),
+            "--source pqc must exclude rfc5280:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("[hygiene]"),
+            "--source pqc must exclude hygiene:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("OK: no findings"),
+            "the clean ML-DSA leaf must report no findings:\n{stdout}"
+        );
+    }
+
+    /// A default (all-source) run on the clean ML-DSA leaf renders the `[pqc]`
+    /// group immediately after `[rfc5280]` (the documented SOURCE_ORDER
+    /// position), with the five PQC lints all passing.
+    #[test]
+    fn default_run_on_mldsa_good_renders_pqc_group_after_rfc5280() {
+        // Setup + Invoke.
+        let output = run(&[fixture("pqc_mldsa_good.pem").to_str().unwrap()]);
+
+        // Find.
+        let stdout = stdout_of(&output);
+
+        // Expect: success, both group headers present, [pqc] after [rfc5280].
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+        let rfc_pos = stdout
+            .find("[rfc5280]")
+            .unwrap_or_else(|| panic!("missing [rfc5280] header:\n{stdout}"));
+        let pqc_pos = stdout
+            .find("[pqc]")
+            .unwrap_or_else(|| panic!("missing [pqc] header:\n{stdout}"));
+        assert!(
+            rfc_pos < pqc_pos,
+            "[pqc] must render after [rfc5280] (SOURCE_ORDER):\n{stdout}"
+        );
+        assert!(
+            stdout.contains("OK: no findings"),
+            "clean ML-DSA leaf must report no findings:\n{stdout}"
+        );
+    }
+
+    /// `--source pqc` on the bad-KU ML-DSA leaf surfaces the
+    /// `pqc_key_usage_consistency` error and exits non-zero (a finding at Error).
+    #[test]
+    fn source_pqc_on_bad_key_usage_reports_the_error() {
+        // Setup + Invoke.
+        let output = run(&[
+            "--source",
+            "pqc",
+            fixture("pqc_bad_key_usage.pem").to_str().unwrap(),
+        ]);
+
+        // Find.
+        let stdout = stdout_of(&output);
+
+        // Expect: the keyEncipherment error from pqc_key_usage_consistency.
+        assert!(
+            stdout.contains("pqc_key_usage_consistency"),
+            "missing pqc_key_usage_consistency finding:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("keyEncipherment"),
+            "finding should name the offending KU bit:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("error"),
+            "finding should render at error severity:\n{stdout}"
+        );
+    }
+
+    /// `--source pqc --verbose` on a NON-PQC cert (`good.pem`) still renders the
+    /// `[pqc]` group (the universal source is filtered in), but every PQC lint is
+    /// listed as `n/a` — the per-lint SPKI gate self-excludes on a classical key.
+    /// Forcing the source does NOT bypass the gate (mirrors `--source cabf_cs`).
+    #[test]
+    fn source_pqc_on_non_pqc_cert_lists_all_lints_not_applicable() {
+        // Setup + Invoke.
+        let output = run(&[
+            "--source",
+            "pqc",
+            "--verbose",
+            fixture("good.pem").to_str().unwrap(),
+        ]);
+
+        // Find.
+        let stdout = stdout_of(&output);
+
+        // Expect: success, the pqc group present, every PQC lint listed as n/a.
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            stdout.contains("[pqc]"),
+            "the universal pqc source must still render its group:\n{stdout}"
+        );
+        for id in PQC_LINT_IDS {
+            assert!(
+                stdout.contains(&format!("n/a   {id}")),
+                "pqc lint {id} must be n/a on a non-PQC cert:\n{stdout}"
+            );
+        }
+        assert!(
+            stdout.contains("OK: no findings"),
+            "no PQC finding fires on a non-PQC cert:\n{stdout}"
+        );
+    }
+
+    /// JSON proof: `--source pqc --format json` on the ML-DSA leaf emits exactly
+    /// five outcomes, all carrying the `pqc` source token and all `applies`.
+    #[test]
+    fn source_pqc_json_emits_five_applying_pqc_outcomes() {
+        // Setup + Invoke.
+        let output = run(&[
+            "--source",
+            "pqc",
+            "--format",
+            "json",
+            fixture("pqc_mldsa_good.pem").to_str().unwrap(),
+        ]);
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+
+        // Find: parse the document.
+        let stdout = stdout_of(&output);
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("CLI JSON output must be valid JSON");
+        let outcomes = value.as_array().expect("top-level JSON must be an array");
+
+        // Expect: exactly five outcomes, all `pqc` and `applies`.
+        assert_eq!(
+            outcomes.len(),
+            5,
+            "--source pqc must yield exactly 5 outcomes"
+        );
+        for o in outcomes {
+            assert_eq!(
+                o["source"],
+                serde_json::json!("pqc"),
+                "every outcome must carry the pqc source token"
+            );
+            assert_eq!(
+                o["applicability"],
+                serde_json::json!("applies"),
+                "every pqc lint must Apply on a PQC leaf"
+            );
+        }
+    }
+}
+
 mod error_behaviour {
     use super::*;
 

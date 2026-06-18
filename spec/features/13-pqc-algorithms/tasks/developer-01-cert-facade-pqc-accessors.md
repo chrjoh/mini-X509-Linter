@@ -2,7 +2,7 @@
 agent: developer
 seq: 1
 title: Cert facade PQC support (PublicKeyAlg ML-DSA/SLH-DSA, params-absent + key-length accessors, KeyUsageView bits)
-status: pending
+status: done
 touches:
   - crates/linter/src/cert.rs
 depends_on: []

@@ -873,3 +873,265 @@ EXT_CS_NOCRL="$(new_ext)"
 make_cs_ext "$EXT_CS_NOCRL" 1 0
 sign_cs "$HERE/cabf_cs_no_crl.pem" "$CS_RSA3072_KEY" \
   "/CN=cs-no-crl.example.com" 97 "$CS_OK_NB" "$CS_OK_NA" "$EXT_CS_NOCRL"
+
+# ===========================================================================
+# Feature 13 — POST-QUANTUM (ML-DSA / SLH-DSA) FIXTURES
+# ===========================================================================
+#
+# These exercise the universal `pqc` lint source (RuleSource::Pqc). Each pqc
+# lint self-gates on the SPKI algorithm being an ML-DSA / SLH-DSA arc member, so
+# these are the ONLY fixtures that engage the gate — every existing RSA/EC
+# fixture stays NotApplicable for all five pqc lints (the no-cascade property).
+#
+# ⚠️  openssl 3.5+ REQUIRED (verified on 3.6.2). ML-DSA / SLH-DSA key and cert
+#     generation is native in openssl 3.5+. The version is checked below and the
+#     script aborts loudly on an older openssl so a missing-algorithm failure is
+#     diagnosable rather than silent.
+#
+# ⚠️  INDEPENDENT-ORACLE RULE: every PQC fixture is generated with openssl,
+#     NEVER with the user's cert-bar tool. The linter must remain an independent
+#     checker over cert-bar's PQC output.
+#
+# ⚠️  TIME-FRAGILITY: the two clean PQC leaves (and every violating PQC leaf)
+#     use the BR_OK window (2026-06-01 -> 2027-06-01) so they straddle "now" and
+#     ONLY the single intended pqc rule fires (not hygiene_not_expired). They
+#     EXPIRE 2027-06-01 — REGENERATE ANNUALLY together with the BR_OK fixtures
+#     above (same chore, same window). After expiry, hygiene_not_expired fires
+#     on these leaves and the pqc.rs isolation tests break wholesale.
+#
+# Fixtures produced (7):
+#   - pqc_mldsa_good.pem        clean ML-DSA-65 leaf (openssl-native). Passes all
+#                               five pqc lints: params absent, 1952-byte key,
+#                               digitalSignature-only KU, CA:FALSE.
+#   - pqc_slhdsa_good.pem       clean SLH-DSA-SHA2-128s leaf (openssl-native).
+#                               Passes all five pqc lints: params absent, 32-byte
+#                               key, digitalSignature-only KU, CA:FALSE.
+#   - pqc_bad_key_usage.pem     ML-DSA-65 leaf asserting keyEncipherment
+#                               (openssl-native config). Violates ONLY
+#                               pqc_key_usage_consistency (Error path).
+#   - pqc_spki_params_present.pem   DER BYTE-PATCH of pqc_mldsa_good: a NULL
+#                               (05 00) is spliced into the SPKI
+#                               AlgorithmIdentifier after the OID and all
+#                               enclosing SEQUENCE lengths recomputed. openssl
+#                               follows the LAMPS profile and will not emit a
+#                               present parameters field, so this requires a
+#                               patch. Violates ONLY pqc_spki_parameters_absent.
+#   - pqc_sig_params_present.pem    DER BYTE-PATCH of pqc_mldsa_good: a NULL is
+#                               spliced into the OUTER Certificate.signatureAlgorithm
+#                               (the field x509-parser exposes as
+#                               signature_algorithm) and lengths recomputed.
+#                               Patch-only for the same reason. Violates ONLY
+#                               pqc_signature_parameters_absent.
+#   - pqc_bad_key_length.pem    DER BYTE-PATCH of pqc_mldsa_good: one byte is
+#                               dropped from the end of the SPKI subjectPublicKey
+#                               BIT STRING (1952 -> 1951) and lengths recomputed.
+#                               This also breaks the signature, which is
+#                               irrelevant to a structural linter (it never
+#                               verifies signatures). Patch-only. Violates ONLY
+#                               pqc_public_key_length.
+#   - pqc_unknown_param_set.pem DER BYTE-PATCH of pqc_slhdsa_good: the final arc
+#                               byte of the SPKI OID is flipped from .20 (0x14,
+#                               SLH-DSA-SHA2-128s) to .32 (0x20), an
+#                               UNASSIGNED slot in the SLH-DSA arc. This is a
+#                               length-preserving single-byte flip (no length
+#                               recomputation). The gate still engages (arc
+#                               member), the length lint stays silent (no known
+#                               length for an unknown set). Violates ONLY
+#                               pqc_algorithm_known.
+#
+# The four byte-patched fixtures are produced by an in-script Python3 DER helper
+# (PQC_DERLIB below) that re-encodes the lengths of every enclosing SEQUENCE so
+# the resulting certificate still parses. This mirrors the byte-patch approach
+# used for rfc5280_version_not_v3 / rfc5280_country_not_printable above.
+
+# openssl 3.5+ guard (ML-DSA / SLH-DSA are native only on 3.5+).
+PQC_OPENSSL_VER="$(openssl version | awk '{print $2}')"
+PQC_OPENSSL_MAJOR="${PQC_OPENSSL_VER%%.*}"
+PQC_OPENSSL_REST="${PQC_OPENSSL_VER#*.}"
+PQC_OPENSSL_MINOR="${PQC_OPENSSL_REST%%.*}"
+if [[ "$PQC_OPENSSL_MAJOR" -lt 3 ]] ||
+  { [[ "$PQC_OPENSSL_MAJOR" -eq 3 ]] && [[ "$PQC_OPENSSL_MINOR" -lt 5 ]]; }; then
+  echo "ERROR: the PQC fixtures require openssl 3.5+ for native ML-DSA / SLH-DSA;" >&2
+  echo "       found openssl $PQC_OPENSSL_VER. Upgrade openssl and re-run." >&2
+  exit 1
+fi
+
+# Reusable in-script Python3 DER toolkit for the four byte-patched PQC fixtures.
+# Walks the certificate's TLV tree, replaces a sub-range, and re-encodes the
+# lengths of all enclosing SEQUENCEs so the output still parses.
+PQC_DERLIB="$(mktemp /tmp/pqc_derlib.XXXXXX.py)"
+cat >"$PQC_DERLIB" <<'PYEOF'
+"""Minimal DER toolkit for the PQC fixture byte-patchers (length-recomputing)."""
+
+def read_len(b, i):
+    first = b[i]; i += 1
+    if first < 0x80:
+        return first, i
+    n = first & 0x7f
+    return int.from_bytes(b[i:i + n], 'big'), i + n
+
+
+def enc_len(n):
+    if n < 0x80:
+        return bytes([n])
+    out = n.to_bytes((n.bit_length() + 7) // 8, 'big')
+    return bytes([0x80 | len(out)]) + out
+
+
+class Node:
+    def __init__(self, buf, start):
+        self.buf = buf
+        self.start = start
+        self.tag = buf[start]
+        self.length, self.content = read_len(buf, start + 1)
+        self.end = self.content + self.length
+
+    def children(self):
+        res, i = [], self.content
+        while i < self.end:
+            c = Node(self.buf, i)
+            res.append(c)
+            i = c.end
+        return res
+
+
+def reencode(tag, content):
+    return bytes([tag]) + enc_len(len(content)) + content
+
+
+def cert_parts(der):
+    root = Node(der, 0)
+    tbs, sigalg, sigval = root.children()
+    return root, tbs, sigalg, sigval
+
+
+def rebuild_cert(new_tbs_content, sigalg, sigval):
+    tbs = reencode(0x30, new_tbs_content)
+    a = sigalg.buf[sigalg.start:sigalg.end]
+    v = sigval.buf[sigval.start:sigval.end]
+    return reencode(0x30, tbs + a + v)
+PYEOF
+
+# --- clean ML-DSA-65 leaf (openssl-native) ---------------------------------
+PQC_MLDSA_KEY="$(mktemp)"
+openssl genpkey -algorithm ML-DSA-65 -out "$PQC_MLDSA_KEY" >/dev/null 2>&1
+PQC_MLDSA_CNF="$(mktemp)"
+cat >"$PQC_MLDSA_CNF" <<'EOF'
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[dn]
+CN = pqc-mldsa.example.com
+[v3]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+subjectAltName = DNS:pqc-mldsa.example.com
+EOF
+openssl req -new -x509 -key "$PQC_MLDSA_KEY" -out "$HERE/pqc_mldsa_good.pem" \
+  -config "$PQC_MLDSA_CNF" -set_serial 200 \
+  -not_before 20260601000000Z -not_after 20270601000000Z >/dev/null 2>&1
+echo "wrote $HERE/pqc_mldsa_good.pem (clean ML-DSA-65 leaf, openssl-native)"
+
+# --- clean SLH-DSA-SHA2-128s leaf (openssl-native) -------------------------
+PQC_SLHDSA_KEY="$(mktemp)"
+openssl genpkey -algorithm SLH-DSA-SHA2-128s -out "$PQC_SLHDSA_KEY" >/dev/null 2>&1
+PQC_SLHDSA_CNF="$(mktemp)"
+sed 's/pqc-mldsa/pqc-slhdsa/g' "$PQC_MLDSA_CNF" >"$PQC_SLHDSA_CNF"
+openssl req -new -x509 -key "$PQC_SLHDSA_KEY" -out "$HERE/pqc_slhdsa_good.pem" \
+  -config "$PQC_SLHDSA_CNF" -set_serial 201 \
+  -not_before 20260601000000Z -not_after 20270601000000Z >/dev/null 2>&1
+echo "wrote $HERE/pqc_slhdsa_good.pem (clean SLH-DSA-SHA2-128s leaf, openssl-native)"
+
+# --- pqc_bad_key_usage: ML-DSA-65 leaf asserting keyEncipherment (native) --
+PQC_BADKU_CNF="$(mktemp)"
+sed 's/keyUsage = critical,digitalSignature/keyUsage = critical,digitalSignature,keyEncipherment/' \
+  "$PQC_MLDSA_CNF" >"$PQC_BADKU_CNF"
+openssl req -new -x509 -key "$PQC_MLDSA_KEY" -out "$HERE/pqc_bad_key_usage.pem" \
+  -config "$PQC_BADKU_CNF" -set_serial 202 \
+  -not_before 20260601000000Z -not_after 20270601000000Z >/dev/null 2>&1
+echo "wrote $HERE/pqc_bad_key_usage.pem (ML-DSA-65 leaf with keyEncipherment KU, native)"
+
+# --- DER-patched fixtures (openssl will not emit these deviations natively) -
+PQC_MLDSA_DER="$(mktemp)"
+PQC_SLHDSA_DER="$(mktemp)"
+openssl x509 -in "$HERE/pqc_mldsa_good.pem" -outform DER -out "$PQC_MLDSA_DER"
+openssl x509 -in "$HERE/pqc_slhdsa_good.pem" -outform DER -out "$PQC_SLHDSA_DER"
+
+# pqc_spki_params_present: splice a NULL into the SPKI AlgorithmIdentifier.
+PQC_PATCH_OUT="$(mktemp)"
+python3 - "$PQC_DERLIB" "$PQC_MLDSA_DER" "$PQC_PATCH_OUT" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("derlib", sys.argv[1])
+d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+der = bytearray(open(sys.argv[2], 'rb').read())
+_, tbs, sigalg, sigval = d.cert_parts(der)
+spki = tbs.children()[6]
+algid, bitstr = spki.children()
+oid = algid.children()[0]
+new_algid = d.reencode(0x30, der[algid.content:oid.end] + bytes([0x05, 0x00]))
+new_spki = d.reencode(0x30, new_algid + der[bitstr.start:bitstr.end])
+new_tbs = der[tbs.content:spki.start] + new_spki + der[spki.end:tbs.end]
+open(sys.argv[3], 'wb').write(d.rebuild_cert(new_tbs, sigalg, sigval))
+PY
+openssl x509 -inform DER -in "$PQC_PATCH_OUT" -outform PEM \
+  -out "$HERE/pqc_spki_params_present.pem"
+echo "wrote $HERE/pqc_spki_params_present.pem (SPKI AlgorithmIdentifier NULL spliced in)"
+
+# pqc_sig_params_present: splice a NULL into the OUTER signatureAlgorithm.
+python3 - "$PQC_DERLIB" "$PQC_MLDSA_DER" "$PQC_PATCH_OUT" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("derlib", sys.argv[1])
+d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+der = bytearray(open(sys.argv[2], 'rb').read())
+_, tbs, sigalg, sigval = d.cert_parts(der)
+oid = sigalg.children()[0]
+new_sigalg = d.reencode(0x30, der[sigalg.content:oid.end] + bytes([0x05, 0x00]))
+out = d.reencode(0x30, der[tbs.start:tbs.end] + new_sigalg + der[sigval.start:sigval.end])
+open(sys.argv[3], 'wb').write(out)
+PY
+openssl x509 -inform DER -in "$PQC_PATCH_OUT" -outform PEM \
+  -out "$HERE/pqc_sig_params_present.pem"
+echo "wrote $HERE/pqc_sig_params_present.pem (outer signatureAlgorithm NULL spliced in)"
+
+# pqc_bad_key_length: drop one byte from the SPKI public-key BIT STRING.
+python3 - "$PQC_DERLIB" "$PQC_MLDSA_DER" "$PQC_PATCH_OUT" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("derlib", sys.argv[1])
+d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+der = bytearray(open(sys.argv[2], 'rb').read())
+_, tbs, sigalg, sigval = d.cert_parts(der)
+spki = tbs.children()[6]
+algid, bitstr = spki.children()
+bs = der[bitstr.content:bitstr.end]
+assert bs[0] == 0x00, "expected 0 unused bits in the BIT STRING"
+new_bitstr = d.reencode(0x03, bs[:-1])          # drop one trailing key byte (1952 -> 1951)
+new_spki = d.reencode(0x30, der[algid.start:algid.end] + new_bitstr)
+new_tbs = der[tbs.content:spki.start] + new_spki + der[spki.end:tbs.end]
+open(sys.argv[3], 'wb').write(d.rebuild_cert(new_tbs, sigalg, sigval))
+PY
+openssl x509 -inform DER -in "$PQC_PATCH_OUT" -outform PEM \
+  -out "$HERE/pqc_bad_key_length.pem"
+echo "wrote $HERE/pqc_bad_key_length.pem (SPKI public key truncated 1952 -> 1951 bytes)"
+
+# pqc_unknown_param_set: flip the SPKI OID arc byte .20 -> .32 (unassigned slot).
+python3 - "$PQC_DERLIB" "$PQC_SLHDSA_DER" "$PQC_PATCH_OUT" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("derlib", sys.argv[1])
+d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+der = bytearray(open(sys.argv[2], 'rb').read())
+_, tbs, _sigalg, _sigval = d.cert_parts(der)
+spki = tbs.children()[6]
+oid = spki.children()[0].children()[0]
+last = oid.end - 1
+assert der[last] == 0x14, "expected SLH-DSA-SHA2-128s SPKI arc byte .20 (0x14)"
+der[last] = 0x20                                # .20 -> .32 (unassigned SLH-DSA slot)
+open(sys.argv[3], 'wb').write(der)
+PY
+openssl x509 -inform DER -in "$PQC_PATCH_OUT" -outform PEM \
+  -out "$HERE/pqc_unknown_param_set.pem"
+echo "wrote $HERE/pqc_unknown_param_set.pem (SPKI OID arc .20 -> .32, unassigned slot)"
+
+rm -f "$PQC_DERLIB" "$PQC_MLDSA_KEY" "$PQC_MLDSA_CNF" "$PQC_SLHDSA_KEY" \
+  "$PQC_SLHDSA_CNF" "$PQC_BADKU_CNF" "$PQC_MLDSA_DER" "$PQC_SLHDSA_DER" \
+  "$PQC_PATCH_OUT"
