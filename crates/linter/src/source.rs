@@ -10,7 +10,7 @@ use serde::Serialize;
 ///
 /// When serialized (with the `serde` feature), variants are rendered in
 /// `snake_case` to match the CLI `--source` vocabulary: `rfc5280`, `cabf_br`,
-/// `cabf_cs`, `hygiene`.
+/// `cabf_cs`, `cabf_smime`, `hygiene`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -21,6 +21,9 @@ pub enum RuleSource {
     CabfBr,
     /// CA/Browser Forum Code-Signing Baseline Requirements.
     CabfCs,
+    /// CA/Browser Forum S/MIME Baseline Requirements for email-protection
+    /// (S/MIME) certificates.
+    CabfSmime,
     /// General certificate hygiene that is not mandated by a specific standard
     /// but is widely considered good practice.
     Hygiene,

@@ -2,7 +2,7 @@
 agent: developer
 seq: 3
 title: Register cabf_smime lints + CertPurpose::Smime + CLI wiring
-status: pending
+status: done
 touches:
   - crates/linter/src/registry.rs
   - crates/cli/src/main.rs
@@ -52,8 +52,8 @@ the affected unit tests.
    source-specific false positive). Add `auto_*` unit tests for the new emailProtection branch
    (Ok(true) → smime set; the serverAuth-wins precedence; Err → generic/fail-closed).
 4. Update in-file unit tests:
-   - `contains_the_known_lints`: registry length 32 → 44 off current main (assuming 12 smime lints;
-     adjust if the reviewer ships 11, or if a sibling 09/11 landed first), outcome count likewise,
+   - `contains_the_known_lints`: registry length 40 → 52 off current main (12 smime lints; feature 09
+     already landed; reconcile again if sibling 11 lands first), outcome count likewise,
      and add the twelve `cabf_smime_*` ids to the
      expected list. Note `sample_cert()` is a CA with no emailProtection, so the smime lints are
      `NotApplicable` but still produce one outcome each → outcome count == registry length.

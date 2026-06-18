@@ -63,9 +63,9 @@ a developer `check()`-level unit test on the defensive path.)
 
 ## Registry / Purpose Unit Tests (developer task 03, in `registry.rs`)
 
-- `contains_the_known_lints`: count 32 → 44 off current main (12 smime lints); add the twelve
+- `contains_the_known_lints`: count 40 → 52 off current main (12 smime lints); add the twelve
   `cabf_smime_*` ids. `sample_cert()` is a CA without emailProtection ⇒ smime lints NotApplicable
-  but still one outcome each ⇒ outcome count == 44.
+  but still one outcome each ⇒ outcome count == 52.
 - `cabf_smime_source_filter_runs_exactly_the_cabf_smime_set`: 12 outcomes, all `CabfSmime`, the
   twelve ids, none from `rfc5280_`/`hygiene_`/`cabf_br_`.
 - `Smime` purpose: `allowed_sources == [Rfc5280, Hygiene, CabfSmime]`; `resolve`/`allowed_sources`
@@ -131,6 +131,8 @@ bash testdata/generate.sh
 
 All ~12 smime lints validated against dedicated fixtures and the clean leaf; EKU-gated scoping
 confirmed (NotApplicable on all pre-existing fixtures); each violating fixture isolates exactly its
-one rule across the 26-lint registry; registry count/filter + `Smime` purpose + `auto` resolver
+one rule within the cabf_smime source (isolated via run_filtered([CabfSmime]) — a raw all-source run
+also trips the broad cabf_br serverAuth lint, the false positive `--purpose smime` suppresses);
+registry count/filter + `Smime` purpose + `auto` resolver
 tests pass; CLI `--source cabf_smime` / `--purpose smime` work; NO existing fixture or cross-feature
 test changed; all verification commands pass.

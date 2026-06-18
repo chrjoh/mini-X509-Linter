@@ -10,7 +10,7 @@
 //!
 //! - `--format <text|json>` — output format (default `text`).
 //! - `--source <list>` — comma-separated subset of
-//!   `rfc5280,cabf_br,cabf_cs,hygiene` (default: all sources).
+//!   `rfc5280,cabf_br,cabf_cs,cabf_smime,hygiene` (default: all sources).
 //! - `--min-severity <notice|warn|error|fatal>` — hide findings below the given
 //!   level (default `notice`).
 //! - `--fail-on <notice|warn|error|fatal>` — exit non-zero if any surfaced
@@ -23,12 +23,13 @@
 //! - `--verbose` / `-v` — opt-in per-lint text listing. Affects `--format text`
 //!   only; `--format json` already emits every lint and is unchanged. Does not
 //!   affect the exit code.
-//! - `--purpose <auto|tls-server|code-signing|generic>` — scopes which lint
-//!   **sources** apply based on the certificate's intended purpose (default
+//! - `--purpose <auto|tls-server|code-signing|smime|generic>` — scopes which
+//!   lint **sources** apply based on the certificate's intended purpose (default
 //!   `auto`). It maps to a [`linter::CertPurpose`] whose allowed-source set is
 //!   intersected with `--source`; the engine then runs only the resulting
 //!   sources. `auto` resolves per certificate from its EKU (codeSigning →
-//!   code-signing, else serverAuth → tls-server, else generic).
+//!   code-signing, else serverAuth → tls-server, else emailProtection → smime,
+//!   else generic).
 //!
 //! Exit code: `0` when no surfaced finding reaches `--fail-on`; `1` when one
 //! does. A load/parse/usage error exits non-zero via the process error path.
@@ -90,14 +91,15 @@ impl From<SeverityLevel> for Severity {
 ///
 /// # Future variants
 ///
-/// `client` and `smime` are reserved as planned future values but are **not
-/// implemented**: until dedicated rule sets exist they would behave like
-/// [`generic`](CliPurpose::Generic). Adding them later is purely additive (no
-/// rename of the shipped variants).
+/// `client` is reserved as a planned future value but is **not implemented**:
+/// until a dedicated rule set exists it would behave like
+/// [`generic`](CliPurpose::Generic). Adding it later is purely additive (no
+/// rename of the shipped variants). `smime` is now shipped (feature 10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliPurpose {
     /// Resolve per certificate from its EKU: codeSigning → code-signing, else
-    /// serverAuth → tls-server, otherwise → generic.
+    /// serverAuth → tls-server, else emailProtection → smime, otherwise →
+    /// generic.
     Auto,
     /// A publicly-trusted TLS server certificate: standard, hygiene, and the
     /// TLS-server-specific `cabf_br` set.
@@ -105,8 +107,12 @@ enum CliPurpose {
     /// A code-signing certificate: standard, hygiene, and the code-signing
     /// `cabf_cs` set.
     CodeSigning,
-    /// A certificate with no TLS-server or code-signing profile: `rfc5280` +
-    /// `hygiene` only, skipping the `cabf_br` / `cabf_cs` sets.
+    /// An S/MIME (email-protection) certificate: standard, hygiene, and the
+    /// S/MIME-specific `cabf_smime` set.
+    Smime,
+    /// A certificate with no TLS-server, code-signing, or S/MIME profile:
+    /// `rfc5280` + `hygiene` only, skipping the `cabf_br` / `cabf_cs` /
+    /// `cabf_smime` sets.
     Generic,
 }
 
@@ -116,6 +122,7 @@ impl From<CliPurpose> for CertPurpose {
             CliPurpose::Auto => CertPurpose::Auto,
             CliPurpose::TlsServer => CertPurpose::TlsServer,
             CliPurpose::CodeSigning => CertPurpose::CodeSigning,
+            CliPurpose::Smime => CertPurpose::Smime,
             CliPurpose::Generic => CertPurpose::Generic,
         }
     }
@@ -136,7 +143,7 @@ struct Args {
     format: Format,
 
     /// Comma-separated lint sources to run: `rfc5280`, `cabf_br`, `cabf_cs`,
-    /// `hygiene`.
+    /// `cabf_smime`, `hygiene`.
     ///
     /// Defaults to all sources when omitted.
     #[arg(long)]
@@ -166,10 +173,11 @@ struct Args {
 
 /// The full set of sources, used when `--source` is omitted. Order matches the
 /// text formatter's `SOURCE_ORDER` for deterministic output.
-const ALL_SOURCES: [RuleSource; 4] = [
+const ALL_SOURCES: [RuleSource; 5] = [
     RuleSource::Rfc5280,
     RuleSource::CabfBr,
     RuleSource::CabfCs,
+    RuleSource::CabfSmime,
     RuleSource::Hygiene,
 ];
 
@@ -182,9 +190,10 @@ fn parse_source_token(token: &str) -> Result<RuleSource> {
         "rfc5280" => Ok(RuleSource::Rfc5280),
         "cabf_br" => Ok(RuleSource::CabfBr),
         "cabf_cs" => Ok(RuleSource::CabfCs),
+        "cabf_smime" => Ok(RuleSource::CabfSmime),
         "hygiene" => Ok(RuleSource::Hygiene),
         other => bail!(
-            "unknown --source value '{other}' (expected rfc5280, cabf_br, cabf_cs, or hygiene)"
+            "unknown --source value '{other}' (expected rfc5280, cabf_br, cabf_cs, cabf_smime, or hygiene)"
         ),
     }
 }
@@ -239,6 +248,7 @@ fn purpose_label(purpose: CertPurpose) -> &'static str {
     match purpose {
         CertPurpose::TlsServer => "tls-server",
         CertPurpose::CodeSigning => "code-signing",
+        CertPurpose::Smime => "smime",
         CertPurpose::Generic => "generic",
         // `Auto` is always resolved before labelling; treat defensively.
         CertPurpose::Auto => "auto",
@@ -478,6 +488,12 @@ mod tests {
         }
 
         #[test]
+        fn parses_cabf_smime_source() {
+            let sources = select_sources(Some("cabf_smime")).unwrap();
+            assert_eq!(sources, vec![RuleSource::CabfSmime]);
+        }
+
+        #[test]
         fn rejects_unknown_token() {
             select_sources(Some("rfc5280,bogus")).unwrap_err();
         }
@@ -514,6 +530,7 @@ mod tests {
                 CertPurpose::from(CliPurpose::CodeSigning),
                 CertPurpose::CodeSigning
             );
+            assert_eq!(CertPurpose::from(CliPurpose::Smime), CertPurpose::Smime);
             assert_eq!(CertPurpose::from(CliPurpose::Generic), CertPurpose::Generic);
         }
     }

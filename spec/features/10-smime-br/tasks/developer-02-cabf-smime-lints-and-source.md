@@ -2,7 +2,7 @@
 agent: developer
 seq: 2
 title: Implement the cabf_smime lints + RuleSource::CabfSmime
-status: pending
+status: done
 touches:
   - crates/linter/src/source.rs
   - crates/linter/src/lints/mod.rs

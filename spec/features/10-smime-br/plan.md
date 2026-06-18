@@ -116,13 +116,15 @@ encoded certificate with our facade (or a modest new accessor). We deliberately 
 `CertPurpose::Auto` currently resolves serverAuth → TlsServer, else → Generic. With this feature and
 its siblings, the leaf-EKU resolution order is:
 
-1. `serverAuth` (OID `…3.1`) present → `TlsServer`.
-2. else `codeSigning` (OID `…3.3`) present → `CodeSigning` (added by feature 09).
+1. `codeSigning` (OID `…3.3`) present → `CodeSigning` (added by feature 09, checked FIRST).
+2. else `serverAuth` (OID `…3.1`) present → `TlsServer`.
 3. else `emailProtection` (OID `…3.4`) present → `Smime` (added by THIS feature).
 4. else → `Generic`.
 
-This precedence is **prescribed** so 05/09/10/11 stay mutually consistent. A cert that asserts both
-serverAuth and emailProtection resolves to `TlsServer` (serverAuth wins) — but note lint 8
+This precedence is **prescribed** so 05/09/10/11 stay mutually consistent and matches the shipped
+`auto_purpose_from` (feature 09 established codeSigning-first). A cert that asserts both
+serverAuth and emailProtection resolves to `TlsServer` (serverAuth wins over emailProtection); a cert
+with codeSigning + serverAuth resolves to `CodeSigning` (codeSigning wins) — but note lint 8
 (`cabf_smime_eku_no_server_auth`) will still flag such a cert *if* it is also linted under the
 `CabfSmime` source (e.g. `--source cabf_smime` or `--purpose smime`), which is the intended
 multipurpose-abuse signal. Document this interaction in task 02 and task 03.
@@ -163,8 +165,8 @@ multipurpose-abuse signal. Document this interaction in task 02 and task 03.
 - `src/lints/cabf_smime/subject_country_valid.rs`
 - `src/registry.rs` — register the ~12 lints (after the `cabf_br` block, deterministic order); add
   `CertPurpose::Smime` + its `smime_sources()` helper + extend the `auto` resolver
-  (`auto_sources_from` / `resolve`); update the in-file unit tests (lint count 32 → 44 off current
-  main after feature 12 — rfc5280=16, cabf_br=12, hygiene=4; reconcile if a sibling 09/11 lands
+  (`auto_sources_from` / `resolve`); update the in-file unit tests (lint count 40 → 52 off current
+  main after feature 09 — rfc5280=16, cabf_br=12, cabf_cs=8, hygiene=4; reconcile if sibling 11 lands
   first; add a `cabf_smime` source-filter test; add `Smime` purpose tests).
 
 **crates/cli/ (production code — developer task 03)**

@@ -2,7 +2,7 @@
 agent: tester
 seq: 4
 title: S/MIME fixtures + integration tests
-status: pending
+status: done
 touches:
   - testdata/generate.sh
   - testdata/cabf_smime_good.pem
@@ -27,9 +27,9 @@ depends_on:
 ## Goal
 
 Add the NEW S/MIME fixtures (openssl-generated, NEVER cert-bar) and the integration tests proving
-each `cabf_smime` lint isolates exactly its one rule, the clean leaf passes the whole 26-lint
-registry, and the EKU gate keeps every smime lint `NotApplicable` on pre-existing fixtures (so NO
-existing fixture is regenerated).
+each `cabf_smime` lint isolates exactly its one rule (within the cabf_smime source via
+run_filtered([CabfSmime])), the clean leaf passes the cabf_smime set, and the EKU gate keeps every
+smime lint `NotApplicable` on pre-existing fixtures (so NO existing fixture is regenerated).
 
 ## Files Owned (conflict scope)
 

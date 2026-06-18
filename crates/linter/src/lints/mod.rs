@@ -6,5 +6,6 @@
 
 pub mod cabf_br;
 pub mod cabf_cs;
+pub mod cabf_smime;
 pub mod hygiene;
 pub mod rfc5280;

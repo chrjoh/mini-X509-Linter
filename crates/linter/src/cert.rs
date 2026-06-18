@@ -14,7 +14,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 use x509_parser::asn1_rs::Oid;
 use x509_parser::certificate::X509Certificate;
-use x509_parser::extensions::{GeneralName, ParsedExtension};
+use x509_parser::extensions::{DistributionPointName, GeneralName, ParsedExtension};
 use x509_parser::objects::{oid_registry, oid2sn};
 use x509_parser::pem::Pem;
 use x509_parser::prelude::FromDer;
@@ -136,6 +136,10 @@ pub struct EkuView {
     /// (RFC 5280 §4.2.1.12); the defining purpose of the CA/Browser Forum
     /// Code-Signing BR profile.
     pub code_signing: bool,
+    /// `true` if the `emailProtection` purpose (OID `1.3.6.1.5.5.7.3.4`) is
+    /// present (RFC 5280 §4.2.1.12); the defining purpose of the CA/Browser
+    /// Forum S/MIME BR profile.
+    pub email_protection: bool,
     /// `true` if the extension carries NO key purposes at all: not `anyExtendedKeyUsage`,
     /// no recognised purpose bit, and no `other` purpose OIDs.
     ///
@@ -507,6 +511,35 @@ impl Cert {
         })
     }
 
+    /// The `rfc822Name` (email) entries from the Subject Alternative Name
+    /// extension, in encounter order, as owned strings.
+    ///
+    /// Consumed by the S/MIME BR `cabf_smime_san_present` lint (S/MIME BR
+    /// §7.1.2.3, which requires the SAN to carry at least one `rfc822Name`) and
+    /// by `cabf_smime_email_in_san` (S/MIME BR §7.1.4.2.1, which requires every
+    /// email-shaped subject CN to appear here). Returns an empty `Vec` when the
+    /// SAN extension is absent, empty, or contains no `rfc822Name` entries.
+    /// Invalid (non-UTF-8) general names are skipped rather than surfaced as an
+    /// error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn san_rfc822_names(&self) -> Result<Vec<String>, CertError> {
+        self.with_parsed(|c| {
+            let mut names = Vec::new();
+            if let Ok(Some(ext)) = c.subject_alternative_name() {
+                for gn in &ext.value.general_names {
+                    if let GeneralName::RFC822Name(name) = gn {
+                        names.push((*name).to_string());
+                    }
+                }
+            }
+            names
+        })
+    }
+
     /// The `iPAddress` entries from the Subject Alternative Name extension, in
     /// encounter order, as [`std::net::IpAddr`] values.
     ///
@@ -578,6 +611,7 @@ impl Cert {
                     server_auth: eku.server_auth,
                     client_auth: eku.client_auth,
                     code_signing: eku.code_signing,
+                    email_protection: eku.email_protection,
                     is_empty: eku_is_empty(eku),
                     oids: eku_oid_strings(eku),
                 }
@@ -634,6 +668,26 @@ impl Cert {
         Ok(self
             .extended_key_usage()?
             .is_some_and(|eku| eku.code_signing))
+    }
+
+    /// Whether the certificate asserts the `emailProtection` EKU purpose
+    /// (OID `1.3.6.1.5.5.7.3.4`).
+    ///
+    /// The defining shape predicate of the CA/Browser Forum S/MIME BR profile:
+    /// every `cabf_smime_*` lint's `applies()` is gated on this
+    /// (`cabf_smime_eku_email_protection_present`, S/MIME BR §7.1.2.3), and the
+    /// `CertPurpose::Auto` resolver uses it to detect S/MIME leaves. Returns
+    /// `false` when the EKU extension is absent (a leaf with no EKU at all does
+    /// not assert `emailProtection`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn has_email_protection(&self) -> Result<bool, CertError> {
+        Ok(self
+            .extended_key_usage()?
+            .is_some_and(|eku| eku.email_protection))
     }
 
     /// The length of the validity window in whole days
@@ -795,6 +849,23 @@ impl Cert {
         })
     }
 
+    /// Whether the certificate carries an Authority Key Identifier extension.
+    ///
+    /// Consumed by the S/MIME BR `cabf_smime_authority_key_identifier_present`
+    /// lint (S/MIME BR §7.1.2.3, which requires the AKI extension on a
+    /// Subscriber cert). This is a *presence* predicate only; see
+    /// [`authority_key_identifier`](Cert::authority_key_identifier) for the
+    /// field-level view. Returns `false` when the extension is absent. A
+    /// duplicated AKI is treated as absent rather than an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn has_authority_key_identifier(&self) -> Result<bool, CertError> {
+        Ok(self.authority_key_identifier()?.is_some())
+    }
+
     /// Whether the certificate carries a Subject Key Identifier extension.
     ///
     /// Relied on by both SKI-presence lints
@@ -879,6 +950,45 @@ impl Cert {
         })
     }
 
+    /// The `fullName` URI entries (`GeneralName::URI`) from every CRL
+    /// Distribution Point, in encounter order, as owned strings.
+    ///
+    /// Consumed by the S/MIME BR `cabf_smime_crl_distribution_points_http` lint
+    /// (S/MIME BR §7.1.2.3, which requires every CRL DP `fullName` URI to use
+    /// the `http`/`https` scheme). Walks every `CRLDistributionPoint`, takes the
+    /// `fullName` form of its `distributionPoint`, and collects each
+    /// `GeneralName::URI`. Non-URI general names (and the
+    /// `nameRelativeToCRLIssuer` form) are skipped. Returns an empty `Vec` when
+    /// the CRL-DP extension is absent or carries no `fullName` URIs. A
+    /// duplicated CRL-DP extension is treated as absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn crl_distribution_point_uris(&self) -> Result<Vec<String>, CertError> {
+        // OID 2.5.29.31 = id-ce-cRLDistributionPoints (RFC 5280 §4.2.1.13).
+        let oid = Oid::from(&[2, 5, 29, 31]).map_err(|_| CertError::Der)?;
+        self.with_parsed(|c| {
+            let mut uris = Vec::new();
+            // A duplicated CRL-DP is treated as absent rather than an error.
+            if let Ok(Some(ext)) = c.get_extension_unique(&oid)
+                && let ParsedExtension::CRLDistributionPoints(dps) = ext.parsed_extension()
+            {
+                for dp in &dps.points {
+                    if let Some(DistributionPointName::FullName(names)) = &dp.distribution_point {
+                        for gn in names {
+                            if let GeneralName::URI(uri) = gn {
+                                uris.push((*uri).to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            uris
+        })
+    }
+
     /// The Name Constraints extension as a [`NameConstraintsView`], or `None`
     /// if the extension is absent.
     ///
@@ -916,6 +1026,48 @@ impl Cert {
         self.with_parsed(|c| {
             c.subject()
                 .iter_country()
+                .filter_map(|atv| atv.as_str().ok().map(str::to_owned))
+                .collect()
+        })
+    }
+
+    /// The subject `countryName` (C, OID 2.5.4.6) attribute values, in encounter
+    /// order, as owned strings — raw, with no length validation.
+    ///
+    /// Consumed by the S/MIME BR `cabf_smime_subject_country_valid` lint
+    /// (S/MIME BR §7.1.4.2, which requires a 2-letter value); the length check
+    /// lives in the lint, not here. This is an alias for
+    /// [`subject_country_values`](Cert::subject_country_values), which already
+    /// enumerates the same attribute for the BR
+    /// `cabf_br_subject_country_not_iso` lint; it exists under the S/MIME-facing
+    /// name the S/MIME subset references. Returns an empty `Vec` when the
+    /// subject has no `countryName` attribute; non-UTF-8 values are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_country_names(&self) -> Result<Vec<String>, CertError> {
+        self.subject_country_values()
+    }
+
+    /// The subject `emailAddress` (OID 1.2.840.113549.1.9.1, PKCS#9) attribute
+    /// values, in encounter order, as owned strings.
+    ///
+    /// Consumed by the S/MIME BR `cabf_smime_single_email_subject` lint
+    /// (S/MIME BR §7.1.4.2.1, which permits at most one `emailAddress` RDN):
+    /// the lint flags when this returns more than one value. Returns an empty
+    /// `Vec` when the subject has no `emailAddress` attribute. Values that are
+    /// not valid UTF-8 are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_email_addresses(&self) -> Result<Vec<String>, CertError> {
+        self.with_parsed(|c| {
+            c.subject()
+                .iter_email()
                 .filter_map(|atv| atv.as_str().ok().map(str::to_owned))
                 .collect()
         })
@@ -1611,6 +1763,87 @@ mod tests {
             assert!(
                 cert.key_usage().unwrap().is_none(),
                 "good.pem has no KeyUsage extension"
+            );
+        }
+    }
+
+    mod feature10_accessors {
+        use super::*;
+
+        /// Loads the workspace `testdata/good.pem` fixture: a BR-compliant TLS
+        /// leaf with the serverAuth EKU (NO emailProtection), a SAN carrying one
+        /// `dNSName` (no `rfc822Name`), no AKI, no CRL-DP, and no subject
+        /// `emailAddress` / `countryName` attributes — the negative case for
+        /// every S/MIME accessor.
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        #[test]
+        fn good_cert_san_has_no_rfc822_names() {
+            let cert = good_cert();
+
+            // good.pem's SAN carries a dNSName, not an rfc822Name.
+            assert!(cert.san_rfc822_names().unwrap().is_empty());
+        }
+
+        #[test]
+        fn good_cert_does_not_assert_email_protection() {
+            let cert = good_cert();
+
+            // good.pem asserts serverAuth, not emailProtection.
+            assert!(!cert.has_email_protection().unwrap());
+
+            // The EkuView.email_protection field agrees with the predicate.
+            let eku = cert.extended_key_usage().unwrap().unwrap();
+            assert!(
+                !eku.email_protection,
+                "good.pem EKU has no emailProtection purpose"
+            );
+            assert!(
+                !eku.oids.contains(&"1.3.6.1.5.5.7.3.4".to_string()),
+                "emailProtection OID absent from EKU oids"
+            );
+        }
+
+        #[test]
+        fn good_cert_has_no_authority_key_identifier_predicate() {
+            let cert = good_cert();
+
+            // Presence predicate agrees with the field-level view (both absent).
+            assert!(!cert.has_authority_key_identifier().unwrap());
+            assert!(cert.authority_key_identifier().unwrap().is_none());
+        }
+
+        #[test]
+        fn good_cert_has_no_crl_distribution_point_uris() {
+            let cert = good_cert();
+
+            // good.pem carries no CRL-DP extension, so no fullName URIs.
+            assert!(!cert.has_crl_distribution_points().unwrap());
+            assert!(cert.crl_distribution_point_uris().unwrap().is_empty());
+        }
+
+        #[test]
+        fn good_cert_has_no_subject_email_address() {
+            let cert = good_cert();
+
+            assert!(cert.subject_email_addresses().unwrap().is_empty());
+        }
+
+        #[test]
+        fn good_cert_subject_country_names_matches_values() {
+            let cert = good_cert();
+
+            // good.pem has no countryName; the S/MIME-facing alias agrees with
+            // the existing BR-facing accessor it delegates to.
+            assert!(cert.subject_country_names().unwrap().is_empty());
+            assert_eq!(
+                cert.subject_country_names().unwrap(),
+                cert.subject_country_values().unwrap()
             );
         }
     }
