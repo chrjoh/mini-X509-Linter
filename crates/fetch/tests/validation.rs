@@ -70,7 +70,7 @@ mod target_shape {
     }
     #[test]
     fn ipv6_literal_is_classified_as_ip() {
-        let t = Target::parse("2001:2042:303c:3300::1db9").unwrap();
+        let t = Target::parse("2005:2142:503c:3300::1db9").unwrap();
         assert!(matches!(t.host(), HostKind::Ip(_)));
     }
 }
