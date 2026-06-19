@@ -1,10 +1,11 @@
 # mini-X509-Linter
 
 mini-X509-Linter is a from-scratch X.509 certificate linter written in Rust and inspired by
-[zlint](https://github.com/zmap/zlint). It parses a certificate, runs a registry of **66**
+[zlint](https://github.com/zmap/zlint). It parses a certificate, runs a registry of **70**
 per-certificate lints, and reports what it finds as human-readable text or machine-readable JSON.
 The per-cert lints are drawn from seven rule sources: **RFC 5280** structural conformance, a set of
-**post-quantum (PQC)** algorithm checks, the four **CA/Browser Forum** profiles (**Baseline
+**post-quantum (PQC)** algorithm checks (ML-DSA / SLH-DSA signatures and ML-KEM key encapsulation),
+the four **CA/Browser Forum** profiles (**Baseline
 Requirements**, **Extended Validation**, **Code Signing**, and **S/MIME**), and a set of
 pragmatic **hygiene** checks. On top of those, an eighth **`chain`** source runs **chain-aware**
 checks across a certificate chain (issuer↔subject linkage, AKI↔SKI matching, pathLen, validity
@@ -135,7 +136,7 @@ mini-x509-lint --fail-on warn --min-severity warn certs/leaf.pem
 
 ## Rule sources & lints
 
-The **66 per-certificate lints** are grouped into seven sources, plus an eighth **`chain`** source
+The **70 per-certificate lints** are grouped into seven sources, plus an eighth **`chain`** source
 of **8 chain-aware lints** (see [Linting a chain](#linting-a-chain--bundle---chain)). Each lint
 declares its source, so `--source` selects them by group and the text report groups findings the same
 way. The counts and a representative sample of each group:
@@ -144,9 +145,15 @@ way. The counts and a representative sample of each group:
   `rfc5280_serial_number_positive`, `rfc5280_validity_not_after_after_not_before`,
   `rfc5280_basic_constraints_critical_on_ca`, `rfc5280_key_usage_present_when_ca`,
   `rfc5280_ext_authority_key_identifier_no_key_identifier`, `rfc5280_utc_time_not_in_zulu`.
-- **`pqc`** (5) — post-quantum signature-algorithm checks for ML-DSA (FIPS 204) and SLH-DSA
-  (FIPS 205): `pqc_algorithm_known`, `pqc_spki_parameters_absent`,
-  `pqc_signature_parameters_absent`, `pqc_public_key_length`, `pqc_key_usage_consistency`.
+- **`pqc`** (9) — post-quantum algorithm checks. Five for the ML-DSA (FIPS 204) and SLH-DSA
+  (FIPS 205) **signature** families: `pqc_algorithm_known`, `pqc_spki_parameters_absent`,
+  `pqc_signature_parameters_absent`, `pqc_public_key_length`, `pqc_key_usage_consistency` (which
+  also rejects encryption/key-agreement bits — `keyEncipherment`, `keyAgreement`,
+  `dataEncipherment`, `encipherOnly`, `decipherOnly` — on a signature-only key). Four more for the
+  ML-KEM (FIPS 203) **key-encapsulation** family, the mirror image of the signature rules:
+  `pqc_mlkem_algorithm_known`, `pqc_mlkem_spki_parameters_absent`, `pqc_mlkem_public_key_length`,
+  and `pqc_mlkem_key_usage_consistency` (a KEM key permits `keyEncipherment` / `keyAgreement` and
+  forbids the signing bits `digitalSignature` / `keyCertSign` / `cRLSign`).
 - **`cabf_br`** (12) — CA/Browser Forum Baseline Requirements for publicly-trusted TLS servers:
   e.g. `cabf_br_validity_max_398_days`, `cabf_br_cn_in_san`,
   `cabf_br_no_internal_names_or_reserved_ip`, `cabf_br_ext_key_usage_server_auth_present`,
@@ -304,7 +311,7 @@ purpose: tls-server (auto)
   ... (16 rfc5280 lints, in lint_id order) ...
 [pqc]
   n/a   pqc_algorithm_known
-  ... (5 pqc lints, all n/a on an RSA key) ...
+  ... (9 pqc lints, all n/a on an RSA key) ...
 [cabf_br]
   pass  cabf_br_cn_in_san
   ... (12 cabf_br lints) ...
@@ -595,8 +602,10 @@ This is a deliberately small linter; be aware of the boundaries:
   name-constraints propagation, and revocation.
 - **The CA/Browser Forum lints are a focused subset.** The BR, EV, code-signing, and S/MIME
   sources implement a curated subset of each specification, not the full text.
-- **PQC coverage is signature algorithms only.** The `pqc` source covers ML-DSA and SLH-DSA;
-  ML-KEM, composite, and stateful hash-based schemes are out of scope.
+- **PQC coverage is ML-DSA, SLH-DSA, and ML-KEM.** The `pqc` source covers the ML-DSA (FIPS 204)
+  and SLH-DSA (FIPS 205) signature families and the ML-KEM (FIPS 203) key-encapsulation family.
+  Composite PQC+classical schemes (`draft-ietf-lamps-pq-composite-*`) and stateful hash-based
+  schemes (LMS/XMSS) are out of scope.
 - **The `linter` crate never touches the network.** Live fetch (`--from-host` and friends) lives
   entirely in the standalone `fetch` crate behind the CLI's opt-in `fetch` feature; the lint
   engine itself stays network-free.
