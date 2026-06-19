@@ -1,6 +1,5 @@
 ---
 source: crates/cli/tests/inspect.rs
-assertion_line: 144
 expression: out
 ---
 Certificate Summary
@@ -19,7 +18,7 @@ Certificate Summary
 [rfc5280]
   (11 passed, 5 not applicable)
 [pqc]
-  (5 passed, 0 not applicable)
+  (5 passed, 4 not applicable)
 [hygiene]
   (2 passed, 2 not applicable)
 OK: no findings

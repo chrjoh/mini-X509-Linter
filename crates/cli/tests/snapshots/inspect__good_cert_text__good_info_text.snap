@@ -1,6 +1,5 @@
 ---
 source: crates/cli/tests/inspect.rs
-assertion_line: 102
 expression: out
 ---
 Certificate Summary
@@ -19,7 +18,7 @@ Certificate Summary
 [rfc5280]
   (7 passed, 9 not applicable)
 [pqc]
-  (0 passed, 5 not applicable)
+  (0 passed, 9 not applicable)
 [cabf_br]
   (12 passed, 0 not applicable)
 [cabf_ev]

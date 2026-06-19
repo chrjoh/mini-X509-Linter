@@ -23,6 +23,10 @@ purpose: tls-server (auto)
 [pqc]
   n/a   pqc_algorithm_known
   n/a   pqc_key_usage_consistency
+  n/a   pqc_mlkem_algorithm_known
+  n/a   pqc_mlkem_key_usage_consistency
+  n/a   pqc_mlkem_public_key_length
+  n/a   pqc_mlkem_spki_parameters_absent
   n/a   pqc_public_key_length
   n/a   pqc_signature_parameters_absent
   n/a   pqc_spki_parameters_absent

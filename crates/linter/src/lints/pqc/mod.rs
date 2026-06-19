@@ -48,7 +48,12 @@
 //! Each accessor `Err` is handled explicitly (no `unwrap`/`expect`/`panic!`).
 
 mod algorithm_known;
+mod kem_params;
 mod key_usage_consistency;
+mod mlkem_algorithm_known;
+mod mlkem_key_usage_consistency;
+mod mlkem_public_key_length;
+mod mlkem_spki_parameters_absent;
 mod params;
 mod public_key_length;
 mod signature_parameters_absent;
@@ -56,6 +61,10 @@ mod spki_parameters_absent;
 
 pub use algorithm_known::AlgorithmKnown;
 pub use key_usage_consistency::KeyUsageConsistency;
+pub use mlkem_algorithm_known::MlKemAlgorithmKnown;
+pub use mlkem_key_usage_consistency::MlKemKeyUsageConsistency;
+pub use mlkem_public_key_length::MlKemPublicKeyLength;
+pub use mlkem_spki_parameters_absent::MlKemSpkiParametersAbsent;
 pub use public_key_length::PublicKeyLength;
 pub use signature_parameters_absent::SignatureParametersAbsent;
 pub use spki_parameters_absent::SpkiParametersAbsent;
@@ -75,7 +84,27 @@ use crate::cert::{Cert, PublicKeyAlg};
 fn applies_to_pqc(cert: &Cert) -> Applicability {
     match cert.public_key_algorithm() {
         Ok(PublicKeyAlg::MlDsa(_)) | Ok(PublicKeyAlg::SlhDsa(_)) => Applicability::Applies,
-        // Rsa / Ec / Other, or an unreadable SPKI algorithm → not in scope.
+        // Rsa / Ec / MlKem / Other, or an unreadable SPKI algorithm → not in scope.
+        Ok(_) | Err(_) => Applicability::NotApplicable,
+    }
+}
+
+/// Shared ML-KEM-SPKI gate for every `mlkem` lint:
+/// [`Applies`](Applicability::Applies) iff the certificate's SPKI algorithm is an
+/// ML-KEM "kems" arc member (any parameter set, **including**
+/// [`PqcParamSet::Unknown`](crate::cert::PqcParamSet::Unknown) so
+/// `pqc_mlkem_algorithm_known` can fire through the registry), else
+/// [`NotApplicable`](Applicability::NotApplicable). The signature gate
+/// [`applies_to_pqc`] never admits an ML-KEM key, so the two PQC families self-gate
+/// independently.
+///
+/// Fail policy: if the SPKI algorithm cannot be read we cannot scope the rule, so
+/// we fail closed to not applicable (see the module-level fail policy).
+fn applies_to_mlkem(cert: &Cert) -> Applicability {
+    match cert.public_key_algorithm() {
+        Ok(PublicKeyAlg::MlKem(_)) => Applicability::Applies,
+        // Rsa / Ec / MlDsa / SlhDsa / Other, or an unreadable SPKI algorithm →
+        // not in scope.
         Ok(_) | Err(_) => Applicability::NotApplicable,
     }
 }

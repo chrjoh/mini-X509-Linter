@@ -154,6 +154,30 @@ expression: value
     "source": "pqc"
   },
   {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "pqc_mlkem_algorithm_known",
+    "source": "pqc"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "pqc_mlkem_spki_parameters_absent",
+    "source": "pqc"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "pqc_mlkem_public_key_length",
+    "source": "pqc"
+  },
+  {
+    "applicability": "not_applicable",
+    "findings": [],
+    "lint_id": "pqc_mlkem_key_usage_consistency",
+    "source": "pqc"
+  },
+  {
     "applicability": "applies",
     "findings": [],
     "lint_id": "cabf_br_validity_max_398_days",

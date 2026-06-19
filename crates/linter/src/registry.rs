@@ -481,6 +481,17 @@ pub fn default_registry_with_now(now_unix: Option<i64>) -> Registry {
         Box::new(pqc::SignatureParametersAbsent::new()),
         Box::new(pqc::PublicKeyLength::new()),
         Box::new(pqc::KeyUsageConsistency::new()),
+        // Post-quantum ML-KEM (FIPS 203) key/cert lints (feature 16). Appended
+        // after the five ML-DSA / SLH-DSA signature `pqc` lints and before the
+        // cabf_br block, keeping the deterministic registration order the feature
+        // 06 golden test relies on. They share the UNIVERSAL `RuleSource::Pqc`
+        // with the signature lints but each self-gates on the SPKI algorithm being
+        // ML-KEM, so all four are NotApplicable on every classical (RSA / EC) and
+        // ML-DSA / SLH-DSA leaf.
+        Box::new(pqc::MlKemAlgorithmKnown::new()),
+        Box::new(pqc::MlKemSpkiParametersAbsent::new()),
+        Box::new(pqc::MlKemPublicKeyLength::new()),
+        Box::new(pqc::MlKemKeyUsageConsistency::new()),
         // CA/Browser Forum Baseline Requirements lints (feature 05). Order is
         // deterministic and matters for the feature 06 golden test — keep it
         // stable.
@@ -870,20 +881,23 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             let outcomes = registry.run(&cert);
 
             // Expect: the four hygiene lints, all sixteen RFC 5280 lints, the five
-            // post-quantum (Pqc) lints, the twelve CA/Browser Forum BR lints, the
-            // nine CA/Browser Forum EV lints, the eight CA/Browser Forum
-            // Code-Signing lints, and the twelve CA/Browser Forum S/MIME lints are
-            // wired in and reported — one outcome per registered lint. Baseline
-            // chosen at integration time: sibling feature 11 (cabf_ev) HAS landed,
-            // so the pre-pqc baseline is 61; adding the five pqc lints makes it 66.
-            // `sample_cert()` is a self-signed RSA CA with no codeSigning or
-            // emailProtection EKU, no EV policy OID, and a classical (RSA) key, so
-            // the BR/EV/CS/SMIME lints, the leaf-only rfc5280 lints, and the
-            // SPKI-self-gated pqc lints are `NotApplicable` but still produce one
-            // outcome each, keeping the outcome count equal to the registry length.
+            // post-quantum signature (Pqc) lints, the four post-quantum ML-KEM
+            // (Pqc) lints, the twelve CA/Browser Forum BR lints, the nine
+            // CA/Browser Forum EV lints, the eight CA/Browser Forum Code-Signing
+            // lints, and the twelve CA/Browser Forum S/MIME lints are wired in and
+            // reported — one outcome per registered lint. Count baseline:
+            // pre-feature-16 total was 66 (61 pre-pqc + the five ML-DSA / SLH-DSA
+            // signature pqc lints); feature 16 adds the four ML-KEM lints
+            // (part 3 adds 0 lints — it only extends an existing lint's findings),
+            // making the new total 70. `sample_cert()` is a self-signed RSA CA with
+            // no codeSigning or emailProtection EKU, no EV policy OID, and a
+            // classical (RSA) key, so the BR/EV/CS/SMIME lints, the leaf-only
+            // rfc5280 lints, and the SPKI-self-gated pqc/ML-KEM lints are
+            // `NotApplicable` but still produce one outcome each, keeping the
+            // outcome count equal to the registry length.
             assert!(!registry.is_empty());
-            assert_eq!(registry.len(), 66);
-            assert_eq!(outcomes.len(), 66);
+            assert_eq!(registry.len(), 70);
+            assert_eq!(outcomes.len(), 70);
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
             for expected in [
@@ -912,6 +926,10 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "pqc_signature_parameters_absent",
                 "pqc_public_key_length",
                 "pqc_key_usage_consistency",
+                "pqc_mlkem_algorithm_known",
+                "pqc_mlkem_spki_parameters_absent",
+                "pqc_mlkem_public_key_length",
+                "pqc_mlkem_key_usage_consistency",
                 "cabf_br_validity_max_398_days",
                 "cabf_br_cn_in_san",
                 "cabf_br_no_internal_names_or_reserved_ip",
@@ -1005,8 +1023,9 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
 
         #[test]
         fn pqc_source_filter_runs_exactly_the_pqc_set() {
-            // Setup & Invoke: filtering by RuleSource::Pqc must select the five
-            // post-quantum lints and nothing else (no RFC 5280, hygiene, or cabf_*
+            // Setup & Invoke: filtering by RuleSource::Pqc must select the nine
+            // post-quantum lints (five ML-DSA / SLH-DSA signature lints + four
+            // ML-KEM lints) and nothing else (no RFC 5280, hygiene, or cabf_*
             // lints). Filtering is by source, before applicability, so the pqc lints
             // appear even though `sample_cert()` carries a classical (RSA) key —
             // they are NotApplicable (self-gated on a PQC SPKI algorithm) but still
@@ -1016,7 +1035,7 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             let outcomes = registry.run_filtered(&cert, &[RuleSource::Pqc]);
 
             // Expect
-            assert_eq!(outcomes.len(), 5);
+            assert_eq!(outcomes.len(), 9);
             assert!(outcomes.iter().all(|o| o.source == RuleSource::Pqc));
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
@@ -1026,6 +1045,10 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "pqc_signature_parameters_absent",
                 "pqc_public_key_length",
                 "pqc_key_usage_consistency",
+                "pqc_mlkem_algorithm_known",
+                "pqc_mlkem_spki_parameters_absent",
+                "pqc_mlkem_public_key_length",
+                "pqc_mlkem_key_usage_consistency",
             ] {
                 assert!(
                     ids.contains(&expected),

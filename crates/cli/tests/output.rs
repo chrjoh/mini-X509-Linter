@@ -586,8 +586,22 @@ mod code_signing_output {
 mod pqc_output {
     use super::*;
 
-    /// The five `pqc` lint ids the post-quantum group must list (feature 13).
-    const PQC_LINT_IDS: [&str; 5] = [
+    /// The nine `pqc` lint ids the post-quantum group must list: the five
+    /// feature-13 *signature* lints plus the four feature-16 *ML-KEM* lints.
+    const PQC_LINT_IDS: [&str; 9] = [
+        "pqc_algorithm_known",
+        "pqc_spki_parameters_absent",
+        "pqc_signature_parameters_absent",
+        "pqc_public_key_length",
+        "pqc_key_usage_consistency",
+        "pqc_mlkem_algorithm_known",
+        "pqc_mlkem_spki_parameters_absent",
+        "pqc_mlkem_public_key_length",
+        "pqc_mlkem_key_usage_consistency",
+    ];
+
+    /// The five feature-13 *signature* `pqc` lint ids.
+    const PQC_SIG_LINT_IDS: [&str; 5] = [
         "pqc_algorithm_known",
         "pqc_spki_parameters_absent",
         "pqc_signature_parameters_absent",
@@ -595,9 +609,19 @@ mod pqc_output {
         "pqc_key_usage_consistency",
     ];
 
+    /// The four feature-16 *ML-KEM* `pqc` lint ids.
+    const PQC_MLKEM_LINT_IDS: [&str; 4] = [
+        "pqc_mlkem_algorithm_known",
+        "pqc_mlkem_spki_parameters_absent",
+        "pqc_mlkem_public_key_length",
+        "pqc_mlkem_key_usage_consistency",
+    ];
+
     /// `--source pqc --verbose` on the clean ML-DSA leaf renders the `[pqc]`
-    /// group with all five PQC lints applying and passing, and no other source
-    /// group. Proves the `--source pqc` token plumbing end-to-end on a PQC cert.
+    /// group with the five *signature* PQC lints applying and passing and the four
+    /// *ML-KEM* lints listed as `n/a` (an ML-DSA key is not a KEM key), and no
+    /// other source group. Proves the `--source pqc` token plumbing end-to-end on
+    /// a PQC signature cert.
     #[test]
     fn source_pqc_on_mldsa_good_runs_only_the_pqc_group() {
         // Setup + Invoke.
@@ -611,8 +635,8 @@ mod pqc_output {
         // Find.
         let stdout = stdout_of(&output);
 
-        // Expect: clean exit, the pqc group present with all five lints passing,
-        // and no other source group rendered.
+        // Expect: clean exit, the pqc group present with the five signature lints
+        // passing and the four ML-KEM lints n/a, and no other source group.
         assert!(
             output.status.success(),
             "expected exit 0, stderr: {:?}",
@@ -622,10 +646,16 @@ mod pqc_output {
             stdout.contains("[pqc]"),
             "missing pqc group header:\n{stdout}"
         );
-        for id in PQC_LINT_IDS {
+        for id in PQC_SIG_LINT_IDS {
             assert!(
                 stdout.contains(&format!("pass  {id}")),
-                "pqc lint {id} should be listed as passed:\n{stdout}"
+                "pqc signature lint {id} should be listed as passed:\n{stdout}"
+            );
+        }
+        for id in PQC_MLKEM_LINT_IDS {
+            assert!(
+                stdout.contains(&format!("n/a   {id}")),
+                "ML-KEM lint {id} should be n/a on an ML-DSA leaf:\n{stdout}"
             );
         }
         assert!(
@@ -744,9 +774,11 @@ mod pqc_output {
     }
 
     /// JSON proof: `--source pqc --format json` on the ML-DSA leaf emits exactly
-    /// five outcomes, all carrying the `pqc` source token and all `applies`.
+    /// nine outcomes, all carrying the `pqc` source token; the five signature
+    /// lints `applies`, the four ML-KEM lints `not_applicable` (an ML-DSA key is
+    /// not a KEM key).
     #[test]
-    fn source_pqc_json_emits_five_applying_pqc_outcomes() {
+    fn source_pqc_json_emits_nine_pqc_outcomes_on_mldsa_leaf() {
         // Setup + Invoke.
         let output = run(&[
             "--source",
@@ -767,11 +799,12 @@ mod pqc_output {
             serde_json::from_str(&stdout).expect("CLI JSON output must be valid JSON");
         let outcomes = value.as_array().expect("top-level JSON must be an array");
 
-        // Expect: exactly five outcomes, all `pqc` and `applies`.
+        // Expect: exactly nine outcomes, all `pqc`; signature lints apply, ML-KEM
+        // lints not_applicable.
         assert_eq!(
             outcomes.len(),
-            5,
-            "--source pqc must yield exactly 5 outcomes"
+            9,
+            "--source pqc must yield exactly 9 outcomes"
         );
         for o in outcomes {
             assert_eq!(
@@ -779,12 +812,137 @@ mod pqc_output {
                 serde_json::json!("pqc"),
                 "every outcome must carry the pqc source token"
             );
+            let id = o["lint_id"].as_str().expect("lint_id is a string");
+            let expected = if PQC_MLKEM_LINT_IDS.contains(&id) {
+                "not_applicable"
+            } else {
+                "applies"
+            };
             assert_eq!(
                 o["applicability"],
-                serde_json::json!("applies"),
-                "every pqc lint must Apply on a PQC leaf"
+                serde_json::json!(expected),
+                "{id} applicability on the ML-DSA leaf"
             );
         }
+    }
+
+    /// `--source pqc --verbose` on the clean ML-KEM-768 leaf renders the `[pqc]`
+    /// group with the four *ML-KEM* lints applying and passing and the five
+    /// *signature* lints listed as `n/a` (an ML-KEM key is not a signature key),
+    /// and no other source group. The CLI e2e for an ML-KEM cert.
+    #[test]
+    fn source_pqc_on_mlkem_good_runs_only_the_pqc_group() {
+        // Setup + Invoke.
+        let output = run(&[
+            "--source",
+            "pqc",
+            "--verbose",
+            fixture("pqc_mlkem_good.pem").to_str().unwrap(),
+        ]);
+
+        // Find.
+        let stdout = stdout_of(&output);
+
+        // Expect: clean exit; the four ML-KEM lints pass, the five signature lints
+        // are n/a, no other source group, no findings.
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            stdout.contains("[pqc]"),
+            "missing pqc group header:\n{stdout}"
+        );
+        for id in PQC_MLKEM_LINT_IDS {
+            assert!(
+                stdout.contains(&format!("pass  {id}")),
+                "ML-KEM lint {id} should be listed as passed:\n{stdout}"
+            );
+        }
+        for id in PQC_SIG_LINT_IDS {
+            assert!(
+                stdout.contains(&format!("n/a   {id}")),
+                "signature lint {id} should be n/a on an ML-KEM leaf:\n{stdout}"
+            );
+        }
+        assert!(
+            !stdout.contains("[rfc5280]"),
+            "--source pqc must exclude rfc5280:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("[hygiene]"),
+            "--source pqc must exclude hygiene:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("OK: no findings"),
+            "the clean ML-KEM leaf must report no findings:\n{stdout}"
+        );
+    }
+
+    /// A default (all-source) run on the clean ML-KEM leaf renders the `[pqc]`
+    /// group immediately after `[rfc5280]` (the documented SOURCE_ORDER position),
+    /// with all nine PQC lints present and no finding. Proves the ML-KEM lints sit
+    /// in the `[pqc]` bucket and the generic ML-KEM leaf produces no spurious
+    /// serverAuth-scoped output.
+    #[test]
+    fn default_run_on_mlkem_good_renders_pqc_group_after_rfc5280() {
+        // Setup + Invoke.
+        let output = run(&[fixture("pqc_mlkem_good.pem").to_str().unwrap()]);
+
+        // Find.
+        let stdout = stdout_of(&output);
+
+        // Expect: success, both group headers present, [pqc] after [rfc5280].
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+        let rfc_pos = stdout
+            .find("[rfc5280]")
+            .unwrap_or_else(|| panic!("missing [rfc5280] header:\n{stdout}"));
+        let pqc_pos = stdout
+            .find("[pqc]")
+            .unwrap_or_else(|| panic!("missing [pqc] header:\n{stdout}"));
+        assert!(
+            rfc_pos < pqc_pos,
+            "[pqc] must render after [rfc5280] (SOURCE_ORDER):\n{stdout}"
+        );
+        assert!(
+            stdout.contains("OK: no findings"),
+            "clean ML-KEM leaf must report no findings:\n{stdout}"
+        );
+    }
+
+    /// `--source pqc` on the ML-KEM bad-KU leaf surfaces the
+    /// `pqc_mlkem_key_usage_consistency` error (the forbidden `digitalSignature`
+    /// signing bit on a KEM key) and exits non-zero.
+    #[test]
+    fn source_pqc_on_mlkem_bad_key_usage_reports_the_error() {
+        // Setup + Invoke.
+        let output = run(&[
+            "--source",
+            "pqc",
+            fixture("pqc_mlkem_bad_key_usage.pem").to_str().unwrap(),
+        ]);
+
+        // Find.
+        let stdout = stdout_of(&output);
+
+        // Expect: the digitalSignature error from pqc_mlkem_key_usage_consistency.
+        assert!(
+            stdout.contains("pqc_mlkem_key_usage_consistency"),
+            "missing pqc_mlkem_key_usage_consistency finding:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("digitalSignature"),
+            "finding should name the offending KU bit:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("error"),
+            "finding should render at error severity:\n{stdout}"
+        );
     }
 }
 

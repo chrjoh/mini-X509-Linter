@@ -3,10 +3,13 @@
 //! ML-DSA / SLH-DSA are **signature** algorithms, so the certificate's Key Usage
 //! must be consistent with a signature key:
 //!
-//! - asserting `keyEncipherment` (bit 2) or `keyAgreement` (bit 4) → **Error**.
-//!   These bits are semantically wrong for a signature-only algorithm: a verifier
-//!   that honoured them would mis-use the key for an operation it cannot perform.
-//!   Because the bit is *actively wrong* (not merely missing), it is an Error.
+//! - asserting any of the five encryption-class bits — `keyEncipherment`
+//!   (bit 2), `dataEncipherment` (bit 3), `keyAgreement` (bit 4), `encipherOnly`
+//!   (bit 7), or `decipherOnly` (bit 8) → **Error**. These bits are semantically
+//!   wrong for a signature-only algorithm: a verifier that honoured them would
+//!   mis-use the key for an encryption / key-establishment operation it cannot
+//!   perform. Because each such bit is *actively wrong* (not merely missing), it
+//!   is an Error; one finding is emitted per offending bit.
 //! - an end-entity leaf (`CA:FALSE`) NOT asserting `digitalSignature` (bit 0) →
 //!   **Warn**. A signature leaf SHOULD assert it, but some valid configurations
 //!   omit it; an absent Key Usage extension on an EE is treated as the same
@@ -61,12 +64,37 @@ fn evaluate(key_usage: Option<KeyUsageView>, is_ca: bool) -> Vec<Finding> {
                     .to_string(),
             });
         }
+        if ku.data_encipherment {
+            findings.push(Finding {
+                severity: Severity::Error,
+                message: "the dataEncipherment key usage bit (RFC 5280 §4.2.1.3, bit 3) is \
+                          asserted on an ML-DSA / SLH-DSA signature key, which cannot perform \
+                          data encipherment"
+                    .to_string(),
+            });
+        }
         if ku.key_agreement {
             findings.push(Finding {
                 severity: Severity::Error,
                 message: "the keyAgreement key usage bit (RFC 5280 §4.2.1.3, bit 4) is asserted \
                           on an ML-DSA / SLH-DSA signature key, which cannot perform key \
                           agreement"
+                    .to_string(),
+            });
+        }
+        if ku.encipher_only {
+            findings.push(Finding {
+                severity: Severity::Error,
+                message: "the encipherOnly key usage bit (RFC 5280 §4.2.1.3, bit 7) is asserted \
+                          on an ML-DSA / SLH-DSA signature key, which cannot perform encipherment"
+                    .to_string(),
+            });
+        }
+        if ku.decipher_only {
+            findings.push(Finding {
+                severity: Severity::Error,
+                message: "the decipherOnly key usage bit (RFC 5280 §4.2.1.3, bit 8) is asserted \
+                          on an ML-DSA / SLH-DSA signature key, which cannot perform decipherment"
                     .to_string(),
             });
         }
@@ -135,18 +163,25 @@ mod tests {
         certs.remove(0)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ku(
         digital_signature: bool,
         key_encipherment: bool,
+        data_encipherment: bool,
         key_agreement: bool,
         key_cert_sign: bool,
+        encipher_only: bool,
+        decipher_only: bool,
     ) -> KeyUsageView {
         KeyUsageView {
             digital_signature,
             key_encipherment,
+            data_encipherment,
             key_agreement,
             key_cert_sign,
             crl_sign: false,
+            encipher_only,
+            decipher_only,
             critical: true,
         }
     }
@@ -156,19 +191,19 @@ mod tests {
 
         #[test]
         fn passes_clean_ee_signature_key() {
-            let view = ku(true, false, false, false);
+            let view = ku(true, false, false, false, false, false, false);
             assert!(evaluate(Some(view), false).is_empty());
         }
 
         #[test]
         fn passes_clean_ca_signature_key() {
-            let view = ku(true, false, false, true);
+            let view = ku(true, false, false, false, true, false, false);
             assert!(evaluate(Some(view), true).is_empty());
         }
 
         #[test]
         fn errors_on_key_encipherment() {
-            let view = ku(true, true, false, false);
+            let view = ku(true, true, false, false, false, false, false);
             let findings = evaluate(Some(view), false);
             assert_eq!(findings.len(), 1);
             assert_eq!(findings[0].severity, Severity::Error);
@@ -176,15 +211,51 @@ mod tests {
 
         #[test]
         fn errors_on_key_agreement() {
-            let view = ku(true, false, true, false);
+            let view = ku(true, false, false, true, false, false, false);
             let findings = evaluate(Some(view), false);
             assert_eq!(findings.len(), 1);
             assert_eq!(findings[0].severity, Severity::Error);
         }
 
         #[test]
+        fn errors_on_data_encipherment() {
+            // Setup: a signature EE asserting dataEncipherment (bit 3).
+            let view = ku(true, false, true, false, false, false, false);
+            // Invoke
+            let findings = evaluate(Some(view), false);
+            // Find & Expect: exactly one Error for the wrong bit.
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].severity, Severity::Error);
+            assert!(findings[0].message.contains("dataEncipherment"));
+        }
+
+        #[test]
+        fn errors_on_encipher_only() {
+            // Setup: a signature EE asserting encipherOnly (bit 7).
+            let view = ku(true, false, false, false, false, true, false);
+            // Invoke
+            let findings = evaluate(Some(view), false);
+            // Find & Expect
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].severity, Severity::Error);
+            assert!(findings[0].message.contains("encipherOnly"));
+        }
+
+        #[test]
+        fn errors_on_decipher_only() {
+            // Setup: a signature EE asserting decipherOnly (bit 8).
+            let view = ku(true, false, false, false, false, false, true);
+            // Invoke
+            let findings = evaluate(Some(view), false);
+            // Find & Expect
+            assert_eq!(findings.len(), 1);
+            assert_eq!(findings[0].severity, Severity::Error);
+            assert!(findings[0].message.contains("decipherOnly"));
+        }
+
+        #[test]
         fn warns_ee_missing_digital_signature() {
-            let view = ku(false, false, false, false);
+            let view = ku(false, false, false, false, false, false, false);
             let findings = evaluate(Some(view), false);
             assert_eq!(findings.len(), 1);
             assert_eq!(findings[0].severity, Severity::Warn);
@@ -192,7 +263,7 @@ mod tests {
 
         #[test]
         fn warns_ca_missing_key_cert_sign() {
-            let view = ku(true, false, false, false);
+            let view = ku(true, false, false, false, false, false, false);
             let findings = evaluate(Some(view), true);
             assert_eq!(findings.len(), 1);
             assert_eq!(findings[0].severity, Severity::Warn);
@@ -207,10 +278,11 @@ mod tests {
 
         #[test]
         fn emits_multiple_findings_for_multiple_offences() {
-            // Both wrong-bits asserted AND missing digitalSignature on an EE.
-            let view = ku(false, true, true, false);
+            // All five encryption-class wrong-bits asserted AND missing
+            // digitalSignature on an EE: 5 Errors + 1 Warn.
+            let view = ku(false, true, true, true, false, true, true);
             let findings = evaluate(Some(view), false);
-            assert_eq!(findings.len(), 3);
+            assert_eq!(findings.len(), 6);
             let errors = findings
                 .iter()
                 .filter(|f| f.severity == Severity::Error)
@@ -219,7 +291,7 @@ mod tests {
                 .iter()
                 .filter(|f| f.severity == Severity::Warn)
                 .count();
-            assert_eq!(errors, 2);
+            assert_eq!(errors, 5);
             assert_eq!(warnings, 1);
         }
     }

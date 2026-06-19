@@ -81,9 +81,12 @@ mod tests {
         KeyUsageView {
             digital_signature: true,
             key_encipherment: false,
+            data_encipherment: false,
             key_agreement: false,
             key_cert_sign: false,
             crl_sign: false,
+            encipher_only: false,
+            decipher_only: false,
             critical,
         }
     }

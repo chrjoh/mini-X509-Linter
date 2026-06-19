@@ -1552,6 +1552,274 @@ rm -f "$PQC_DERLIB" "$PQC_MLDSA_KEY" "$PQC_MLDSA_CNF" "$PQC_SLHDSA_KEY" \
   "$PQC_SLHDSA_CNF" "$PQC_BADKU_CNF" "$PQC_MLDSA_DER" "$PQC_SLHDSA_DER" \
   "$PQC_PATCH_OUT"
 
+# ===========================================================================
+# Feature 16 — POST-QUANTUM ML-KEM (FIPS 203) KEY/CERT FIXTURES
+# ===========================================================================
+#
+# These exercise the four feature-16 `pqc_mlkem_*` lints (still under the
+# universal RuleSource::Pqc). Each ML-KEM lint self-gates on the SPKI algorithm
+# being an ML-KEM "kems"-arc member (PublicKeyAlg::MlKem), so these are the ONLY
+# fixtures that engage that gate — every existing RSA/EC/ML-DSA/SLH-DSA fixture
+# stays NotApplicable for all four ML-KEM lints (the no-cascade property), and
+# the five feature-13 *signature* lints stay NotApplicable on these ML-KEM keys.
+#
+# ⚠️  openssl 3.5+ REQUIRED (verified on 3.6.2). Re-uses the PQC version guard
+#     above (this section runs after it). ML-KEM key generation is native; an
+#     ML-KEM cert is minted by an ML-DSA CA via `x509 -req -force_pubkey` (see
+#     below), since ML-KEM keys CANNOT self-sign or sign their own CSR.
+#
+# ⚠️  -force_pubkey RECIPE (architect-verified, OpenSSL 3.6.2): ML-KEM keys are
+#     key-establishment only and cannot produce a signature, so neither
+#     `req -x509` (self-sign) nor signing a CSR works. The working native path:
+#       1. an ML-DSA CA (signer) self-signs a CA cert;
+#       2. an ML-KEM-768 key is generated and its public key exported (PEM);
+#       3. a DUMMY CSR is signed with the CA's own ML-DSA key; the ML-KEM public
+#          key is substituted as the certificate SPKI via `-force_pubkey`.
+#     The result is a valid cert with `Public Key Algorithm: ML-KEM-768` and an
+#     ABSENT SPKI parameters field (LAMPS profile). The clean leaf is therefore
+#     openssl-native (NO byte-patching). The CA's ML-DSA private key is throwaway
+#     and not committed; only the leaf fixtures are kept.
+#
+# ℹ️  FIXED DATES — NOT TIME-FRAGILE: every ML-KEM leaf uses the BR_OK window
+#     (2026-06-01 -> 2027-06-01). The pqc-filtered isolation runs are
+#     clock-independent; the full-registry no-cascade runs pin the clock to
+#     TEST_NOW = 1796083200 (2026-12-01) via default_registry_with_now(...) /
+#     CLI --now 1796083200, so hygiene_not_expired never trips. The clean leaf's
+#     subject CN == its SAN DNS (pqc-mlkem.example.com) so that EVEN under a
+#     forced cabf_br run the leaf trips no cabf_br_cn_in_san. Because the clock is
+#     pinned, these fixtures do NOT need annual regeneration; the fixed window is
+#     kept for byte-reproducibility.
+#
+# ML-KEM-768 encapsulation-key length = 1184 bytes (FIPS 203 §8; the SPKI BIT
+# STRING content is 1185 octets = 1 unused-bits octet + 1184 raw key octets).
+#
+# Fixtures produced (5):
+#   - pqc_mlkem_good.pem            clean ML-KEM-768 leaf (openssl-native via
+#                                   -force_pubkey): params absent, 1184-byte key,
+#                                   keyEncipherment KU, CA:FALSE. Passes all 4
+#                                   ML-KEM lints. NO byte-patching.
+#   - pqc_mlkem_bad_key_usage.pem   ML-KEM-768 leaf asserting
+#                                   digitalSignature + keyEncipherment KU
+#                                   (openssl-native config). The forbidden
+#                                   signing bit Errors; keyEncipherment suppresses
+#                                   the missing-encryption-bit Warn, so this
+#                                   isolates EXACTLY pqc_mlkem_key_usage_consistency
+#                                   (one Error finding).
+#   - pqc_mlkem_unknown_param_set.pem   DER BYTE-PATCH of pqc_mlkem_good: the final
+#                                   SPKI OID arc byte is flipped .2 (0x02,
+#                                   ML-KEM-768) -> .4 (0x04), an UNASSIGNED slot in
+#                                   the ML-KEM "kems" arc. Length-preserving single
+#                                   byte flip (no length recomputation). The gate
+#                                   still engages (arc member); the length lint
+#                                   stays silent (no known length for an unknown
+#                                   set). Violates ONLY pqc_mlkem_algorithm_known.
+#   - pqc_mlkem_spki_params_present.pem  DER BYTE-PATCH of pqc_mlkem_good: a NULL
+#                                   (05 00) is spliced into the SPKI
+#                                   AlgorithmIdentifier after the OID and all
+#                                   enclosing SEQUENCE lengths recomputed. openssl
+#                                   follows the LAMPS profile (absent params) so
+#                                   this requires a patch. Violates ONLY
+#                                   pqc_mlkem_spki_parameters_absent.
+#   - pqc_mlkem_bad_key_length.pem  DER BYTE-PATCH of pqc_mlkem_good: one byte is
+#                                   dropped from the end of the SPKI
+#                                   subjectPublicKey BIT STRING (1184 -> 1183) and
+#                                   lengths recomputed. Violates ONLY
+#                                   pqc_mlkem_public_key_length.
+#
+# ⚠️  BYTE-PATCH CAVEAT: the three DER-patched ML-KEM fixtures alter the SPKI,
+#     which is covered by the issuer's signature over the TBSCertificate — so the
+#     CA signature no longer verifies on those three. This is acceptable: the
+#     linter is a STRUCTURAL checker and never verifies certificate signatures.
+#     (The ML-KEM lints all gate on / read structure, not signatures.) The clean
+#     leaf and the bad-KU leaf are NOT patched and verify against the CA.
+#
+# Re-uses the PQC_DERLIB helper pattern; a local copy is created here so this
+# section is self-contained (the feature-13 copy was already rm'd above).
+
+# openssl 3.5+ guard (ML-KEM is native only on 3.5+); same check as the PQC
+# section, repeated so this block is self-contained if reordered.
+MLKEM_OPENSSL_VER="$(openssl version | awk '{print $2}')"
+MLKEM_OPENSSL_MAJOR="${MLKEM_OPENSSL_VER%%.*}"
+MLKEM_OPENSSL_REST="${MLKEM_OPENSSL_VER#*.}"
+MLKEM_OPENSSL_MINOR="${MLKEM_OPENSSL_REST%%.*}"
+if [[ "$MLKEM_OPENSSL_MAJOR" -lt 3 ]] ||
+  { [[ "$MLKEM_OPENSSL_MAJOR" -eq 3 ]] && [[ "$MLKEM_OPENSSL_MINOR" -lt 5 ]]; }; then
+  echo "ERROR: the ML-KEM fixtures require openssl 3.5+ for native ML-KEM / ML-DSA;" >&2
+  echo "       found openssl $MLKEM_OPENSSL_VER. Upgrade openssl and re-run." >&2
+  exit 1
+fi
+
+# Local DER toolkit (length-recomputing) for the three ML-KEM byte-patches.
+MLKEM_DERLIB="$(mktemp /tmp/mlkem_derlib.XXXXXX.py)"
+cat >"$MLKEM_DERLIB" <<'PYEOF'
+"""Minimal DER toolkit for the ML-KEM fixture byte-patchers (length-recomputing)."""
+
+def read_len(b, i):
+    first = b[i]; i += 1
+    if first < 0x80:
+        return first, i
+    n = first & 0x7f
+    return int.from_bytes(b[i:i + n], 'big'), i + n
+
+
+def enc_len(n):
+    if n < 0x80:
+        return bytes([n])
+    out = n.to_bytes((n.bit_length() + 7) // 8, 'big')
+    return bytes([0x80 | len(out)]) + out
+
+
+class Node:
+    def __init__(self, buf, start):
+        self.buf = buf
+        self.start = start
+        self.tag = buf[start]
+        self.length, self.content = read_len(buf, start + 1)
+        self.end = self.content + self.length
+
+    def children(self):
+        res, i = [], self.content
+        while i < self.end:
+            c = Node(self.buf, i)
+            res.append(c)
+            i = c.end
+        return res
+
+
+def reencode(tag, content):
+    return bytes([tag]) + enc_len(len(content)) + content
+
+
+def cert_parts(der):
+    root = Node(der, 0)
+    tbs, sigalg, sigval = root.children()
+    return root, tbs, sigalg, sigval
+
+
+def rebuild_cert(new_tbs_content, sigalg, sigval):
+    tbs = reencode(0x30, new_tbs_content)
+    a = sigalg.buf[sigalg.start:sigalg.end]
+    v = sigval.buf[sigval.start:sigval.end]
+    return reencode(0x30, tbs + a + v)
+
+
+def spki_node(der):
+    """Return the SubjectPublicKeyInfo node of a v3 cert (tbs child index 6:
+    version[0], serial, sigalg, issuer, validity, subject, SPKI, ...)."""
+    _, tbs, _, _ = cert_parts(der)
+    return tbs.children()[6]
+PYEOF
+
+MLKEM_WORK="$(mktemp -d)"
+MK() { printf '%s/%s' "$MLKEM_WORK" "$1"; }
+
+# 1. ML-DSA CA (signer). Self-signed; never committed.
+openssl genpkey -algorithm ML-DSA-65 -out "$(MK ca.key)" >/dev/null 2>&1
+openssl req -new -x509 -key "$(MK ca.key)" -subj "/CN=mlkem-test-ca" \
+  -not_before 20260601000000Z -not_after 20270601000000Z -out "$(MK ca.pem)" >/dev/null 2>&1
+
+# 2. ML-KEM-768 leaf key + exported public key.
+openssl genpkey -algorithm ML-KEM-768 -out "$(MK mlkem.key)" >/dev/null 2>&1
+openssl pkey -in "$(MK mlkem.key)" -pubout -out "$(MK mlkem.pub.pem)" >/dev/null 2>&1
+
+# 3. Dummy CSR signed by the CA's ML-DSA key (CN == SAN so cabf_br_cn_in_san stays
+#    quiet even under a forced cabf_br run).
+openssl req -new -key "$(MK ca.key)" -subj "/CN=pqc-mlkem.example.com" \
+  -out "$(MK dummy.csr)" >/dev/null 2>&1
+
+# clean leaf ext: keyEncipherment KU, CA:FALSE, SAN == CN.
+cat >"$(MK ext_good.cnf)" <<'EOF'
+[v3]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,keyEncipherment
+subjectAltName = DNS:pqc-mlkem.example.com
+EOF
+
+# --- pqc_mlkem_good.pem (openssl-native, -force_pubkey) ---------------------
+openssl x509 -req -in "$(MK dummy.csr)" -CA "$(MK ca.pem)" -CAkey "$(MK ca.key)" \
+  -force_pubkey "$(MK mlkem.pub.pem)" -extfile "$(MK ext_good.cnf)" -extensions v3 \
+  -set_serial 210 -not_before 20260601000000Z -not_after 20270601000000Z \
+  -out "$HERE/pqc_mlkem_good.pem" >/dev/null 2>&1
+echo "wrote $HERE/pqc_mlkem_good.pem (clean ML-KEM-768 leaf, openssl-native -force_pubkey)"
+
+# --- pqc_mlkem_bad_key_usage.pem (openssl-native config) -------------------
+# digitalSignature (forbidden signing bit -> Error) + keyEncipherment (so the
+# missing-encryption Warn is suppressed; isolates exactly one Error).
+cat >"$(MK ext_badku.cnf)" <<'EOF'
+[v3]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+subjectAltName = DNS:pqc-mlkem.example.com
+EOF
+openssl x509 -req -in "$(MK dummy.csr)" -CA "$(MK ca.pem)" -CAkey "$(MK ca.key)" \
+  -force_pubkey "$(MK mlkem.pub.pem)" -extfile "$(MK ext_badku.cnf)" -extensions v3 \
+  -set_serial 214 -not_before 20260601000000Z -not_after 20270601000000Z \
+  -out "$HERE/pqc_mlkem_bad_key_usage.pem" >/dev/null 2>&1
+echo "wrote $HERE/pqc_mlkem_bad_key_usage.pem (ML-KEM-768 leaf with digitalSignature KU, native)"
+
+# --- DER-patched ML-KEM fixtures (openssl will not emit these natively) -----
+openssl x509 -in "$HERE/pqc_mlkem_good.pem" -outform DER -out "$(MK good.der)" >/dev/null 2>&1
+
+# pqc_mlkem_unknown_param_set: flip the SPKI OID arc byte .2 -> .4 (unassigned).
+python3 - "$MLKEM_DERLIB" "$(MK good.der)" "$(MK unknown.der)" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("derlib", sys.argv[1])
+d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+der = bytearray(open(sys.argv[2], 'rb').read())
+spki = d.spki_node(der)
+oid = spki.children()[0].children()[0]
+last = oid.end - 1
+assert der[last] == 0x02, "expected ML-KEM-768 SPKI arc byte .2 (0x02)"
+der[last] = 0x04                                # .2 -> .4 (unassigned ML-KEM slot)
+open(sys.argv[3], 'wb').write(der)
+PY
+openssl x509 -inform DER -in "$(MK unknown.der)" -outform PEM \
+  -out "$HERE/pqc_mlkem_unknown_param_set.pem"
+echo "wrote $HERE/pqc_mlkem_unknown_param_set.pem (SPKI OID arc .2 -> .4, unassigned slot)"
+
+# pqc_mlkem_spki_params_present: splice a NULL into the SPKI AlgorithmIdentifier.
+python3 - "$MLKEM_DERLIB" "$(MK good.der)" "$(MK params.der)" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("derlib", sys.argv[1])
+d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+der = bytearray(open(sys.argv[2], 'rb').read())
+_, tbs, sigalg, sigval = d.cert_parts(der)
+spki = d.spki_node(der)
+algid, bitstr = spki.children()
+oid = algid.children()[0]
+new_algid = d.reencode(0x30, der[algid.content:oid.end] + bytes([0x05, 0x00]))
+new_spki = d.reencode(0x30, new_algid + der[bitstr.start:bitstr.end])
+new_tbs = der[tbs.content:spki.start] + new_spki + der[spki.end:tbs.end]
+open(sys.argv[3], 'wb').write(d.rebuild_cert(new_tbs, sigalg, sigval))
+PY
+openssl x509 -inform DER -in "$(MK params.der)" -outform PEM \
+  -out "$HERE/pqc_mlkem_spki_params_present.pem"
+echo "wrote $HERE/pqc_mlkem_spki_params_present.pem (SPKI AlgorithmIdentifier NULL spliced in)"
+
+# pqc_mlkem_bad_key_length: drop one byte from the SPKI public-key BIT STRING.
+python3 - "$MLKEM_DERLIB" "$(MK good.der)" "$(MK badlen.der)" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("derlib", sys.argv[1])
+d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
+der = bytearray(open(sys.argv[2], 'rb').read())
+_, tbs, sigalg, sigval = d.cert_parts(der)
+spki = d.spki_node(der)
+algid, bitstr = spki.children()
+bs = der[bitstr.content:bitstr.end]
+assert bs[0] == 0x00, "expected 0 unused bits in the BIT STRING"
+new_bitstr = d.reencode(0x03, bs[:-1])          # drop one trailing key byte (1184 -> 1183)
+new_spki = d.reencode(0x30, der[algid.start:algid.end] + new_bitstr)
+new_tbs = der[tbs.content:spki.start] + new_spki + der[spki.end:tbs.end]
+open(sys.argv[3], 'wb').write(d.rebuild_cert(new_tbs, sigalg, sigval))
+PY
+openssl x509 -inform DER -in "$(MK badlen.der)" -outform PEM \
+  -out "$HERE/pqc_mlkem_bad_key_length.pem"
+echo "wrote $HERE/pqc_mlkem_bad_key_length.pem (SPKI public key truncated 1184 -> 1183 bytes)"
+
+# Throwaway CA key / CSR / configs / DER scratch are not committed.
+rm -rf "$MLKEM_WORK"
+rm -f "$MLKEM_DERLIB"
+
 # ============================================================================
 # Feature 08 (certificate inspection / `--info`) — SLH-DSA root CA fixture
 # ============================================================================

@@ -94,11 +94,18 @@ pub struct KeyUsageView {
     pub digital_signature: bool,
     /// `true` if the `keyEncipherment` bit (bit 2) is asserted
     /// (RFC 5280 §4.2.1.3). Consumed by `pqc_key_usage_consistency`: a PQC
-    /// *signature* key MUST NOT assert it.
+    /// *signature* key MUST NOT assert it. Also a permitted/expected bit for an
+    /// ML-KEM key in `pqc_mlkem_key_usage_consistency`.
     pub key_encipherment: bool,
+    /// `true` if the `dataEncipherment` bit (bit 3) is asserted
+    /// (RFC 5280 §4.2.1.3). Consumed by `pqc_key_usage_consistency`: a PQC
+    /// *signature* key MUST NOT assert it (it is meaningless for a
+    /// signature-only key).
+    pub data_encipherment: bool,
     /// `true` if the `keyAgreement` bit (bit 4) is asserted
     /// (RFC 5280 §4.2.1.3). Consumed by `pqc_key_usage_consistency`: a PQC
-    /// *signature* key MUST NOT assert it.
+    /// *signature* key MUST NOT assert it. Also a permitted/expected bit for an
+    /// ML-KEM key in `pqc_mlkem_key_usage_consistency`.
     pub key_agreement: bool,
     /// `true` if the `keyCertSign` bit (bit 5) is asserted
     /// (RFC 5280 §4.2.1.3).
@@ -106,6 +113,14 @@ pub struct KeyUsageView {
     /// `true` if the `cRLSign` bit (bit 6) is asserted (RFC 5280 §4.2.1.3).
     /// Consumed by `pqc_key_usage_consistency` as the CA-side SHOULD check.
     pub crl_sign: bool,
+    /// `true` if the `encipherOnly` bit (bit 7) is asserted
+    /// (RFC 5280 §4.2.1.3). Consumed by `pqc_key_usage_consistency`: a PQC
+    /// *signature* key MUST NOT assert it.
+    pub encipher_only: bool,
+    /// `true` if the `decipherOnly` bit (bit 8) is asserted
+    /// (RFC 5280 §4.2.1.3). Consumed by `pqc_key_usage_consistency`: a PQC
+    /// *signature* key MUST NOT assert it.
+    pub decipher_only: bool,
     /// `true` if the extension is marked critical.
     pub critical: bool,
 }
@@ -199,6 +214,19 @@ pub enum PublicKeyAlg {
     /// profile, RFC number TBC). The carried [`PqcParamSet`] names the parameter
     /// set (`.20`–`.31`) or marks an unassigned arc member (`.32`–`.35`).
     SlhDsa(PqcParamSet),
+    /// A Module-Lattice Key-Encapsulation Mechanism (ML-KEM) public key, whose
+    /// SPKI OID lies in the NIST `2.16.840.1.101.3.4.4.{1,2,3}` "kems" arc
+    /// (NIST FIPS 203 + the IETF LAMPS ML-KEM X.509 algorithm-identifier
+    /// profile, RFC/draft number TBC). The carried [`PqcParamSet`] names the
+    /// parameter set (`.1` ML-KEM-512, `.2` ML-KEM-768, `.3` ML-KEM-1024) or
+    /// marks an unassigned arc member.
+    ///
+    /// Unlike [`MlDsa`](PublicKeyAlg::MlDsa) / [`SlhDsa`](PublicKeyAlg::SlhDsa),
+    /// which are signature algorithms, ML-KEM is the **encryption-only** (key
+    /// establishment / KEM) counterpart; its KeyUsage consistency rule is the
+    /// inverse (`keyEncipherment` / `keyAgreement` permitted, signing bits
+    /// forbidden — see `pqc_mlkem_key_usage_consistency`).
+    MlKem(PqcParamSet),
     /// Any other algorithm, identified by its SPKI algorithm OID in dotted form.
     Other(String),
 }
@@ -604,9 +632,12 @@ impl Cert {
             c.key_usage().ok().flatten().map(|ext| KeyUsageView {
                 digital_signature: ext.value.digital_signature(),
                 key_encipherment: ext.value.key_encipherment(),
+                data_encipherment: ext.value.data_encipherment(),
                 key_agreement: ext.value.key_agreement(),
                 key_cert_sign: ext.value.key_cert_sign(),
                 crl_sign: ext.value.crl_sign(),
+                encipher_only: ext.value.encipher_only(),
+                decipher_only: ext.value.decipher_only(),
                 critical: ext.critical,
             })
         })
@@ -926,9 +957,13 @@ impl Cert {
     /// **Any** member of those two arcs maps to its PQC variant — an arc OID
     /// whose slot is not an assigned parameter set carries
     /// [`PqcParamSet::Unknown`], so the gate engages and `pqc_algorithm_known`
-    /// can flag it. Every other algorithm is returned as
-    /// [`PublicKeyAlg::Other`] carrying the dotted SPKI algorithm OID rather
-    /// than being treated as an error.
+    /// can flag it. The post-quantum KEM family ML-KEM is recognised by its
+    /// NIST `2.16.840.1.101.3.4.4` "kems" arc and returned as
+    /// [`PublicKeyAlg::MlKem`] (`.1`–`.3`, NIST FIPS 203), per the IETF LAMPS
+    /// ML-KEM X.509 algorithm-identifier profile (RFC/draft number TBC), with
+    /// the same arc-engages-the-gate behaviour. Every other algorithm is
+    /// returned as [`PublicKeyAlg::Other`] carrying the dotted SPKI algorithm
+    /// OID rather than being treated as an error.
     ///
     /// # Errors
     ///
@@ -944,6 +979,7 @@ impl Cert {
                 "1.2.840.113549.1.1.1" => PublicKeyAlg::Rsa,
                 "1.2.840.10045.2.1" => PublicKeyAlg::Ec,
                 other => classify_pqc_oid(other)
+                    .or_else(|| classify_mlkem_oid(other))
                     .unwrap_or_else(|| PublicKeyAlg::Other(other.to_string())),
             }
         })
@@ -2077,6 +2113,59 @@ fn slh_dsa_param_set_name(slot: u32) -> Option<&'static str> {
     }
 }
 
+/// The NIST `2.16.840.1.101.3.4.4` "kems" arc that prefixes every ML-KEM OID,
+/// in dotted form with a trailing dot. Distinct from the
+/// [`PQC_ARC_PREFIX`] "sigAlgs" arc used by the signature families.
+const MLKEM_ARC_PREFIX: &str = "2.16.840.1.101.3.4.4.";
+
+/// Classifies a dotted SPKI algorithm OID as an ML-KEM key, or `None` if it is
+/// not in the post-quantum KEM OID arc.
+///
+/// Recognises the NIST FIPS 203 ML-KEM arc `2.16.840.1.101.3.4.4.{1,2,3}`
+/// (`.1` ML-KEM-512, `.2` ML-KEM-768, `.3` ML-KEM-1024), per the IETF LAMPS
+/// ML-KEM X.509 algorithm-identifier profile (RFC/draft number TBC). An OID that
+/// lies in the arc but whose final component is not an assigned parameter-set
+/// slot — `.0`, `.4` and above, or any other member of the arc with no published
+/// mapping — is still returned as [`PublicKeyAlg::MlKem`] carrying
+/// [`PqcParamSet::Unknown`], so the `pqc` gate engages and a future
+/// `pqc_mlkem_algorithm_known` can flag it. Anything outside the arc yields
+/// `None`, leaving `public_key_algorithm()` to fall through to
+/// [`PublicKeyAlg::Other`].
+///
+/// This is the sibling of [`classify_pqc_oid`] for the separate "kems" arc; it
+/// deliberately does NOT overload that signature-arc classifier.
+///
+/// The OID → parameter-set table below was transcribed from FIPS 203 §8 (sizes
+/// table) and MUST be re-verified against the published LAMPS registration.
+fn classify_mlkem_oid(dotted: &str) -> Option<PublicKeyAlg> {
+    // The final arithmetic component after the shared "kems" arc prefix.
+    let suffix = dotted.strip_prefix(MLKEM_ARC_PREFIX)?;
+    // The suffix must be a single integer component (no further sub-arc); a
+    // longer OID such as `...4.2.1` is not an assigned ML-KEM algorithm. We are
+    // still under the arc, so report it as an Unknown arc member rather than
+    // None, mirroring option (A) in the feature 16 plan.
+    if suffix.contains('.') {
+        return Some(PublicKeyAlg::MlKem(PqcParamSet::Unknown(
+            dotted.to_string(),
+        )));
+    }
+    // A non-numeric trailing component cannot be a slot number; treat it as
+    // outside the recognised arc.
+    let slot: u32 = suffix.parse().ok()?;
+
+    // ML-KEM (FIPS 203): .1 ML-KEM-512, .2 ML-KEM-768, .3 ML-KEM-1024.
+    let name = match slot {
+        1 => Some("ML-KEM-512"),
+        2 => Some("ML-KEM-768"),
+        3 => Some("ML-KEM-1024"),
+        _ => None,
+    };
+    let params = name
+        .map(PqcParamSet::Known)
+        .unwrap_or_else(|| PqcParamSet::Unknown(dotted.to_string()));
+    Some(PublicKeyAlg::MlKem(params))
+}
+
 /// Converts a SAN `iPAddress` octet string to an [`IpAddr`].
 ///
 /// RFC 5280 §4.2.1.6 encodes an `iPAddress` general name as a raw OCTET STRING:
@@ -3134,6 +3223,69 @@ mod tests {
             assert!(slh_dsa_param_set_name(20).is_some());
             assert!(slh_dsa_param_set_name(31).is_some());
             assert!(slh_dsa_param_set_name(32).is_none());
+        }
+    }
+
+    mod classify_mlkem_oid {
+        use super::super::classify_mlkem_oid;
+        use super::{PqcParamSet, PublicKeyAlg};
+
+        #[test]
+        fn known_slots_map_to_known_param_sets() {
+            assert_eq!(
+                classify_mlkem_oid("2.16.840.1.101.3.4.4.1"),
+                Some(PublicKeyAlg::MlKem(PqcParamSet::Known("ML-KEM-512")))
+            );
+            assert_eq!(
+                classify_mlkem_oid("2.16.840.1.101.3.4.4.2"),
+                Some(PublicKeyAlg::MlKem(PqcParamSet::Known("ML-KEM-768")))
+            );
+            assert_eq!(
+                classify_mlkem_oid("2.16.840.1.101.3.4.4.3"),
+                Some(PublicKeyAlg::MlKem(PqcParamSet::Known("ML-KEM-1024")))
+            );
+        }
+
+        #[test]
+        fn unassigned_arc_members_are_unknown() {
+            // .0 and .4+ lie in the kems arc but name no published parameter
+            // set: still an ML-KEM variant carrying Unknown so the gate engages
+            // and a future pqc_mlkem_algorithm_known can flag it (option A).
+            for slot in [0u32, 4, 5, 99] {
+                let dotted = format!("2.16.840.1.101.3.4.4.{slot}");
+                assert_eq!(
+                    classify_mlkem_oid(&dotted),
+                    Some(PublicKeyAlg::MlKem(PqcParamSet::Unknown(dotted.clone()))),
+                    "slot .{slot} should be an unknown ML-KEM arc member"
+                );
+            }
+        }
+
+        #[test]
+        fn oids_outside_the_kems_arc_are_not_mlkem() {
+            // RSA / EC OIDs and the sibling sigAlgs arc are not ML-KEM.
+            assert_eq!(classify_mlkem_oid("1.2.840.113549.1.1.1"), None);
+            assert_eq!(classify_mlkem_oid("1.2.840.10045.2.1"), None);
+            assert_eq!(classify_mlkem_oid("2.16.840.1.101.3.4.3.18"), None);
+        }
+
+        #[test]
+        fn multi_component_suffix_under_the_arc_is_unknown() {
+            // A longer numeric OID still under the kems arc is not an assigned
+            // algorithm slot but stays an Unknown arc member (option A).
+            let dotted = "2.16.840.1.101.3.4.4.2.1";
+            assert_eq!(
+                classify_mlkem_oid(dotted),
+                Some(PublicKeyAlg::MlKem(PqcParamSet::Unknown(
+                    dotted.to_string()
+                )))
+            );
+        }
+
+        #[test]
+        fn malformed_arc_suffix_is_not_mlkem() {
+            // A non-numeric trailing component cannot be a slot number.
+            assert_eq!(classify_mlkem_oid("2.16.840.1.101.3.4.4.xx"), None);
         }
     }
 
