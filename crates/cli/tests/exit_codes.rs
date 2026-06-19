@@ -29,10 +29,20 @@ fn fixture(name: &str) -> PathBuf {
     path
 }
 
+/// A reference "now" (2026-12-01 in Unix seconds) inside every currently-valid
+/// fixture window and after `expired.pem`'s past `notAfter` (2024-06-01), so the
+/// expired fixture still reads expired. Pinning `--now` makes the exit codes
+/// deterministic regardless of the wall clock — without it, the currently-valid
+/// fixtures (good.pem, chain_valid.pem) would trip `hygiene_not_expired` once the
+/// real date passes their `notAfter`, flipping the `--fail-on warn` exit codes.
+const TEST_NOW: &str = "1796083200";
+
 /// Runs the binary with `args` and returns its exit code (`None` => killed by
-/// signal, which should never happen for these tests).
+/// signal, which should never happen for these tests). Pins `--now` so exit codes
+/// are wall-clock independent; `--now` is a no-op for the usage/arg-error paths.
 fn exit_code(args: &[&str]) -> Option<i32> {
     Command::new(BIN)
+        .args(["--now", TEST_NOW])
         .args(args)
         .output()
         .expect("failed to spawn mini-x509-lint binary")

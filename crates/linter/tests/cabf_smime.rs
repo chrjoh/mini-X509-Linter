@@ -49,7 +49,15 @@
 //! Conventions (`.claude/rules/rust-testing-core.md`): SIFER, nested module per
 //! lint, `.unwrap()`-style result assertions.
 
-use linter::{Applicability, Cert, RuleSource, Severity, default_registry};
+use linter::{
+    Applicability, Cert, RuleSource, Severity, default_registry, default_registry_with_now,
+};
+
+/// A reference "now" inside every currently-valid fixture window (2026-12-01 in
+/// Unix seconds), used to pin the clock for full-registry runs that include the
+/// hygiene source so `hygiene_not_expired` cannot trip once the real date passes
+/// the fixtures' `notAfter`.
+const TEST_NOW: i64 = 1_796_083_200;
 
 // `include_bytes!` resolves relative to this source file
 // (crates/linter/tests/cabf_smime.rs); `../../../testdata` reaches the
@@ -188,7 +196,7 @@ mod good_passes_the_whole_smime_set {
         // purpose filter suppresses — see the module doc.)
         let cert = load_leaf(SMIME_GOOD_PEM);
 
-        let outcomes = default_registry().run_filtered(
+        let outcomes = default_registry_with_now(Some(TEST_NOW)).run_filtered(
             &cert,
             &[
                 RuleSource::Rfc5280,
@@ -533,7 +541,7 @@ mod scoping_and_no_cascade {
         // fixtures, so none needed regeneration.
         let cert = load_leaf(GOOD_PEM);
 
-        let outcomes = default_registry().run(&cert);
+        let outcomes = default_registry_with_now(Some(TEST_NOW)).run(&cert);
 
         let smime_outcomes: Vec<_> = outcomes
             .iter()
@@ -567,7 +575,7 @@ mod scoping_and_no_cascade {
         // and confirm every cabf_smime outcome is NotApplicable.
         let cert = load_leaf(CA_PEM);
 
-        let outcomes = default_registry().run(&cert);
+        let outcomes = default_registry_with_now(Some(TEST_NOW)).run(&cert);
 
         let smime_outcomes: Vec<_> = outcomes
             .iter()

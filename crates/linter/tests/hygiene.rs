@@ -36,7 +36,13 @@
 //! annually (see `testdata/generate.sh`).
 
 use linter::lints::hygiene::{EcdsaCurveAllowlist, NoSha1Signature, RsaKeyMin2048};
-use linter::{Applicability, Cert, Lint, Severity, default_registry};
+use linter::{Applicability, Cert, Lint, Severity, default_registry_with_now};
+
+/// A reference "now" inside every currently-valid fixture window (2026-12-01 in
+/// Unix seconds), used to pin the clock for full-registry runs that include the
+/// hygiene source so `hygiene_not_expired` cannot trip once the real date passes
+/// the fixtures' `notAfter` (these leaves expire 2027-06-01).
+const TEST_NOW: i64 = 1_796_083_200;
 
 // `include_bytes!` resolves relative to this source file
 // (crates/linter/tests/hygiene.rs); `../../../testdata` reaches the
@@ -217,7 +223,7 @@ mod default_registry_isolation {
             (ECDSA_BAD_CURVE_PEM, "hygiene_ecdsa_curve_allowlist"),
         ];
 
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
 
         for (pem, expected_lint) in cases {
             let cert = load_leaf(pem);
@@ -244,7 +250,7 @@ mod default_registry_isolation {
     /// hygiene lints.
     #[test]
     fn good_pem_yields_no_error_or_fatal_findings() {
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(GOOD_PEM);
 
         let outcomes = registry.run(&cert);

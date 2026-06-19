@@ -49,7 +49,15 @@ use linter::lints::cabf_ev::{
     OrganizationIdPresent, OrganizationNameMissing, SanNoIpAddress, SerialNumberMissing,
     ValidityMax398Days,
 };
-use linter::{Applicability, Cert, Lint, RuleSource, Severity, default_registry};
+use linter::{
+    Applicability, Cert, Lint, RuleSource, Severity, default_registry, default_registry_with_now,
+};
+
+/// A reference "now" inside every currently-valid fixture window (2026-12-01 in
+/// Unix seconds), used to pin the clock for full-registry runs that include the
+/// hygiene source so `hygiene_not_expired` cannot trip once the real date passes
+/// the fixtures' `notAfter`.
+const TEST_NOW: i64 = 1_796_083_200;
 
 // `include_bytes!` resolves relative to this source file
 // (crates/linter/tests/cabf_ev.rs); `../../../testdata` reaches the
@@ -113,7 +121,7 @@ fn assert_error_mentions(findings: &[linter::Finding], needle: &str) {
 /// The sorted lint_ids that carry an Error/Fatal finding over the FULL registry
 /// for `pem`.
 fn firing_error_lints(pem: &[u8]) -> Vec<&'static str> {
-    let registry = default_registry();
+    let registry = default_registry_with_now(Some(TEST_NOW));
     let cert = load_leaf(pem);
     let mut firing: Vec<&'static str> = registry
         .run(&cert)
@@ -335,7 +343,7 @@ mod self_scoping {
     /// existing fixtures.
     #[test]
     fn all_ev_lints_not_applicable_on_non_ev_good_leaf() {
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(GOOD_PEM);
         let outcomes = registry.run(&cert);
 
@@ -357,7 +365,7 @@ mod self_scoping {
     /// leaf, no EV policy OID).
     #[test]
     fn all_ev_lints_not_applicable_on_ca_cert() {
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(CA_BC_NOT_CRITICAL_PEM);
         let outcomes = registry.run(&cert);
 
@@ -378,7 +386,7 @@ mod self_scoping {
     /// serverAuth leaf asserting the recognized test EV policy OID).
     #[test]
     fn all_ev_lints_apply_on_ev_good_leaf() {
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(EV_GOOD_PEM);
         let outcomes = registry.run(&cert);
 
@@ -404,7 +412,7 @@ mod default_registry_isolation {
     /// BR/RFC/hygiene lints pass too.
     #[test]
     fn ev_good_yields_no_error_or_fatal_findings() {
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(EV_GOOD_PEM);
         let outcomes = registry.run(&cert);
 

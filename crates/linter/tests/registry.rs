@@ -27,8 +27,15 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use linter::{
-    Applicability, Cert, Finding, Lint, Registry, RuleSource, Severity, default_registry,
+    Applicability, Cert, Finding, Lint, Registry, RuleSource, Severity, default_registry_with_now,
 };
+
+/// A reference "now" inside every currently-valid fixture window (2026-12-01 in
+/// Unix seconds) and after `expired.pem`'s past `notAfter` (2024-06-01). Pinning
+/// the clock for full-registry / hygiene-inclusive runs makes them deterministic
+/// regardless of the real wall clock — without this, leaf fixtures would trip
+/// `hygiene_not_expired` once the real date passes their `notAfter`.
+const TEST_NOW: i64 = 1_796_083_200;
 
 // `include_bytes!` resolves relative to this source file
 // (crates/linter/tests/registry.rs); `../../../testdata` reaches the
@@ -375,7 +382,7 @@ mod default_registry_engine {
     #[test]
     fn default_registry_has_the_expected_total_lint_count() {
         // Setup & Invoke
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(EXPIRED_PEM);
         let outcomes = registry.run(&cert);
 
@@ -392,7 +399,7 @@ mod default_registry_engine {
     #[test]
     fn default_registry_flags_expired_fixture_with_warn() {
         // Setup
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(EXPIRED_PEM);
 
         // Invoke
@@ -427,7 +434,7 @@ mod default_registry_engine {
     #[test]
     fn expired_fixture_isolates_only_the_not_expired_finding() {
         // Setup.
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(EXPIRED_PEM);
 
         // Invoke.

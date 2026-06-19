@@ -40,6 +40,15 @@
 //!   sources. `auto` resolves per certificate from its EKU (codeSigning →
 //!   code-signing, else serverAuth → tls-server, else emailProtection → smime,
 //!   else generic).
+//! - `--now <UNIX_SECONDS>` — long-only override for the reference time used by
+//!   time-based lints (currently only `hygiene_not_expired`). The value is a Unix
+//!   timestamp in **seconds** (all-digits, optionally negative for pre-1970);
+//!   RFC3339 / `YYYY-MM-DD` forms are not accepted because the workspace pulls in
+//!   no date-parsing dependency. Defaulting to omitted uses the real wall clock.
+//!   Pinning `--now` evaluates "will this be expired as of date X" and makes
+//!   time-based output deterministic. It does **not** affect the `--from-host`
+//!   chain `verification:` verdict, which uses webpki's real-time validation
+//!   separately. A malformed value is a usage error and exits non-zero.
 //!
 //! Exit code: `0` when no surfaced finding reaches `--fail-on`; `1` when one
 //! does. A load/parse/usage error exits non-zero via the process error path.
@@ -55,7 +64,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use linter::{Cert, CertPurpose, RuleSource, Severity, default_registry};
+use linter::{Cert, CertPurpose, RuleSource, Severity, default_registry_with_now};
 
 use output::{CertReport, PurposeHeader, Verbosity};
 
@@ -235,6 +244,36 @@ struct Args {
     /// `{ "summary": {…}, "lints": [ … ] }`.
     #[arg(long)]
     info: bool,
+
+    /// Reference time (Unix seconds) for time-based lints (e.g.
+    /// `hygiene_not_expired`).
+    ///
+    /// Long-only (no short alias). Accepts a Unix timestamp in seconds
+    /// (all-digits, may be negative); RFC3339 / `YYYY-MM-DD` are not accepted (no
+    /// date-parsing dependency is available). Default (omitted) uses the real
+    /// wall clock. Pinning it evaluates "expired as of date X" and makes
+    /// time-based output deterministic. Does not affect the `--from-host`
+    /// `verification:` verdict.
+    #[arg(long, value_name = "UNIX_SECONDS", value_parser = parse_now)]
+    now: Option<i64>,
+}
+
+/// Parses the `--now` value: a Unix timestamp in **seconds**.
+///
+/// Accepts an all-digits integer, optionally prefixed with `-` for instants
+/// before the Unix epoch. RFC3339 / `YYYY-MM-DD` forms are intentionally not
+/// accepted because the workspace pulls in no date-parsing dependency.
+///
+/// # Errors
+///
+/// Returns an error string (surfaced by clap as a usage error) if the value is
+/// not a valid base-10 `i64`.
+fn parse_now(raw: &str) -> Result<i64, String> {
+    raw.trim().parse::<i64>().map_err(|_| {
+        format!(
+            "invalid --now value '{raw}' (expected a Unix timestamp in seconds, e.g. 1796083200)"
+        )
+    })
 }
 
 /// The full set of sources, used when `--source` is omitted. Order matches the
@@ -394,7 +433,9 @@ fn run(args: &Args) -> Result<ExitCode> {
     }
 
     let certs = load_input_certs(args)?;
-    let registry = default_registry();
+    // Per-cert lints honour the `--now` override (only `hygiene_not_expired` is
+    // time-based). The chain pass below stays clock-independent.
+    let registry = default_registry_with_now(args.now);
 
     // The purpose header is resolved against the leaf (the cert that anchors the
     // run); in chain mode each cert is still filtered against its own resolution.
@@ -866,7 +907,10 @@ fn run_from_host(
     // Only the leaf is linted.
     let leaf = Cert::from_der(&chain.leaf_der)
         .context("failed to parse the leaf certificate presented by the host")?;
-    let registry = default_registry();
+    // The leaf's per-cert lints honour `--now`; the `--from-host`
+    // `verification:` verdict is computed separately (webpki real-time) and is
+    // unaffected.
+    let registry = default_registry_with_now(args.now);
 
     let header = build_purpose_header(args.purpose, purpose, &leaf);
     let effective = effective_sources(purpose, &leaf, selected);
@@ -1091,6 +1135,35 @@ mod tests {
         #[test]
         fn rejects_empty_token() {
             select_sources(Some("rfc5280,,hygiene")).unwrap_err();
+        }
+    }
+
+    mod parse_now {
+        use super::*;
+
+        #[test]
+        fn parses_positive_unix_seconds() {
+            assert_eq!(parse_now("1796083200").unwrap(), 1_796_083_200);
+        }
+
+        #[test]
+        fn parses_negative_unix_seconds() {
+            assert_eq!(parse_now("-1").unwrap(), -1);
+        }
+
+        #[test]
+        fn trims_surrounding_whitespace() {
+            assert_eq!(parse_now("  42 ").unwrap(), 42);
+        }
+
+        #[test]
+        fn rejects_non_numeric_value() {
+            parse_now("2026-12-01").unwrap_err();
+        }
+
+        #[test]
+        fn rejects_empty_value() {
+            parse_now("").unwrap_err();
         }
     }
 

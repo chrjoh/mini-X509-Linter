@@ -394,7 +394,34 @@ fn evaluate(lint: &dyn Lint, cert: &Cert) -> LintOutcome {
 ///
 /// This is the single, obvious place lints are wired up. Later features append
 /// their lints here.
+///
+/// The reference "now" for time-based lints (currently only
+/// [`hygiene_not_expired`](crate::lints::hygiene::NotExpired)) is the real wall
+/// clock. To pin it to a fixed instant — for deterministic output or to evaluate
+/// "as of date X" — use [`default_registry_with_now`] instead. This function is
+/// exactly equivalent to `default_registry_with_now(None)`.
 pub fn default_registry() -> Registry {
+    default_registry_with_now(None)
+}
+
+/// Builds the default registry with an explicit reference "now" for time-based
+/// lints.
+///
+/// The lint set, order, ids, and [`RuleSource`]s are byte-for-byte identical to
+/// [`default_registry`]; the only difference is how the single
+/// wall-clock-sensitive lint,
+/// [`hygiene_not_expired`](crate::lints::hygiene::NotExpired), is constructed:
+///
+/// - `now_unix == None` → real clock (`SystemTime::now()`), identical to
+///   [`default_registry`].
+/// - `now_unix == Some(n)` → the lint evaluates expiry as of Unix timestamp `n`
+///   (seconds), making time-based output deterministic and enabling "will this be
+///   expired as of date X" checks.
+///
+/// Every other lint is clock-independent (for example the chain validity checks
+/// compare certificate windows to each other, not to now), so `now_unix` affects
+/// only `hygiene_not_expired`.
+pub fn default_registry_with_now(now_unix: Option<i64>) -> Registry {
     use crate::lints::cabf_br;
     use crate::lints::cabf_cs;
     use crate::lints::cabf_ev;
@@ -403,12 +430,19 @@ pub fn default_registry() -> Registry {
     use crate::lints::pqc;
     use crate::lints::rfc5280;
 
+    // The single wall-clock-sensitive lint: pin to `now_unix` when supplied,
+    // otherwise use the real clock. Everything else below is clock-independent.
+    let not_expired = match now_unix {
+        Some(n) => hygiene::NotExpired::with_now_unix(n),
+        None => hygiene::NotExpired::new(),
+    };
+
     Registry::with_lints(vec![
         // --- add new lints here ---
         // Hygiene (features 02 & 04). Order is deterministic and matters for the
         // feature 06 golden test — keep it stable. `not_expired` is registered
         // exactly once here (no earlier registration to deduplicate).
-        Box::new(hygiene::NotExpired::new()),
+        Box::new(not_expired),
         Box::new(hygiene::NoSha1Signature::new()),
         Box::new(hygiene::RsaKeyMin2048::new()),
         Box::new(hygiene::EcdsaCurveAllowlist::new()),

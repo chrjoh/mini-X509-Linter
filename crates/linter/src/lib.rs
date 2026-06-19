@@ -46,7 +46,7 @@ pub use chain::{
     OrderedChain, build_chain, default_chain_registry,
 };
 pub use finding::{Applicability, Finding, LintOutcome, Severity};
-pub use registry::{CertPurpose, Registry, default_registry};
+pub use registry::{CertPurpose, Registry, default_registry, default_registry_with_now};
 pub use source::RuleSource;
 
 /// A single certificate-linting rule.

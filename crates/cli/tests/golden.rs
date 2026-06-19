@@ -56,9 +56,20 @@ fn fixture(name: &str) -> PathBuf {
     path
 }
 
-/// Runs the binary with `args` and returns the captured [`Output`].
+/// A reference "now" (2026-12-01 in Unix seconds) inside every currently-valid
+/// fixture window and after `expired.pem`'s past `notAfter`. Every fixture-linting
+/// invocation pins `--now` to this value so `hygiene_not_expired` cannot trip once
+/// the real date passes the fixtures' `notAfter` — keeping the golden snapshots
+/// deterministic regardless of the wall clock. Today the real clock is inside the
+/// windows, so pinning produces byte-identical output (no snapshot change).
+const TEST_NOW: &str = "1796083200";
+
+/// Runs the binary with `args` and returns the captured [`Output`]. Pins `--now`
+/// so fixture linting is independent of the wall clock; `--now` is a no-op for the
+/// non-linting (usage/arg-error) paths, so it is safe to apply uniformly here.
 fn run(args: &[&str]) -> Output {
     Command::new(BIN)
+        .args(["--now", TEST_NOW])
         .args(args)
         .output()
         .expect("failed to spawn mini-x509-lint binary")

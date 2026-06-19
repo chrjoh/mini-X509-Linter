@@ -43,7 +43,15 @@
 //! lint, `.unwrap()`-style result assertions.
 
 use linter::lints::cabf_cs::EkuRequired;
-use linter::{Applicability, Cert, Lint, RuleSource, Severity, default_registry};
+use linter::{
+    Applicability, Cert, Lint, RuleSource, Severity, default_registry, default_registry_with_now,
+};
+
+/// A reference "now" inside every currently-valid fixture window (2026-12-01 in
+/// Unix seconds), used to pin the clock for full-registry runs that include the
+/// hygiene source so `hygiene_not_expired` cannot trip once the real date passes
+/// the fixtures' `notAfter`.
+const TEST_NOW: i64 = 1_796_083_200;
 
 // `include_bytes!` resolves relative to this source file
 // (crates/linter/tests/cabf_cs.rs); `../../../testdata` reaches the
@@ -446,7 +454,7 @@ mod scoping_and_no_cascade {
         // set never engages on existing TLS/generic fixtures.
         let cert = load_leaf(GOOD_PEM);
 
-        let outcomes = default_registry().run(&cert);
+        let outcomes = default_registry_with_now(Some(TEST_NOW)).run(&cert);
 
         let cs_outcomes: Vec<_> = outcomes
             .iter()

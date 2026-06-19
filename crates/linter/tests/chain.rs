@@ -47,8 +47,14 @@
 use linter::lints::chain::{AkiSkiMatch, IssuerIsCa, PathLenRespected, ValidityNested};
 use linter::{
     Cert, ChainLint, ConstructionDiagnostic, RuleSource, Severity, build_chain,
-    default_chain_registry, default_registry,
+    default_chain_registry, default_registry_with_now,
 };
+
+/// A reference "now" inside every currently-valid fixture window (2026-12-01 in
+/// Unix seconds), used to pin the clock for the per-cert full-registry run so
+/// `hygiene_not_expired` cannot trip once the real date passes the fixtures'
+/// `notAfter`.
+const TEST_NOW: i64 = 1_796_083_200;
 
 // include_bytes! resolves relative to this source file
 // (crates/linter/tests/chain.rs); ../../../testdata reaches the workspace-root
@@ -130,7 +136,7 @@ mod registry_shape {
         // Setup + Invoke: run the per-cert registry over a chain fixture's leaf and
         // confirm no chain id appears.
         let leaf = load_bundle(CHAIN_VALID).remove(0);
-        let outcomes = default_registry().run(&leaf);
+        let outcomes = default_registry_with_now(Some(TEST_NOW)).run(&leaf);
 
         // Expect: no per-cert outcome carries a chain_* id or the Chain source.
         for o in &outcomes {

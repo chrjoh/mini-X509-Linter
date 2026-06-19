@@ -63,9 +63,19 @@ fn fixture_arg(name: &str) -> String {
     fixture(name).to_string_lossy().into_owned()
 }
 
-/// Runs the binary with `args` and returns the captured [`Output`].
+/// A reference "now" (2026-12-01 in Unix seconds) inside every currently-valid
+/// fixture window. Pinning `--now` keeps the `--info` snapshots (which append the
+/// lint report) deterministic regardless of the wall clock — without it, the
+/// currently-valid fixtures (good.pem, chain_bundle.pem's leaf) would trip
+/// `hygiene_not_expired` once the real date passes their `notAfter`. Today the
+/// real clock is inside the windows, so pinning produces byte-identical output.
+const TEST_NOW: &str = "1796083200";
+
+/// Runs the binary with `args` and returns the captured [`Output`]. Pins `--now`
+/// so the appended lint report is wall-clock independent.
 fn run(args: &[&str]) -> Output {
     Command::new(BIN)
+        .args(["--now", TEST_NOW])
         .args(args)
         .output()
         .expect("failed to spawn mini-x509-lint binary")

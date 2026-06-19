@@ -40,7 +40,15 @@
 //! openssl-native; the four deviating fixtures are documented DER byte-patches
 //! (openssl follows the LAMPS profile and will not emit the deviations).
 
-use linter::{Applicability, Finding, RuleSource, Severity, default_registry};
+use linter::{
+    Applicability, Finding, RuleSource, Severity, default_registry, default_registry_with_now,
+};
+
+/// A reference "now" inside every currently-valid fixture window (2026-12-01 in
+/// Unix seconds), used to pin the clock for full-registry runs that include the
+/// hygiene source so `hygiene_not_expired` cannot trip once the real date passes
+/// the fixtures' `notAfter`.
+const TEST_NOW: i64 = 1_796_083_200;
 
 /// Loads the single leaf certificate from a PEM fixture under `testdata/`.
 ///
@@ -273,7 +281,7 @@ mod no_cascade {
     fn raw_run_on_rsa_good_has_all_pqc_outcomes_not_applicable() {
         // Setup + Invoke: the FULL shipped registry on a classical cert.
         let cert = load_fixture("good.pem");
-        let outcomes = default_registry().run(&cert);
+        let outcomes = default_registry_with_now(Some(TEST_NOW)).run(&cert);
 
         // Find: just the pqc-sourced outcomes.
         let pqc: Vec<&linter::LintOutcome> = outcomes
@@ -308,7 +316,7 @@ mod no_cascade {
     fn raw_run_on_pqc_leaf_leaves_rsa_ec_hygiene_not_applicable() {
         // Setup + Invoke.
         let cert = load_fixture("pqc_mldsa_good.pem");
-        let outcomes = default_registry().run(&cert);
+        let outcomes = default_registry_with_now(Some(TEST_NOW)).run(&cert);
 
         // Find + Expect: each key-strength hygiene lint is present and N/A.
         for id in ["hygiene_rsa_key_min_2048", "hygiene_ecdsa_curve_allowlist"] {
@@ -342,7 +350,7 @@ mod no_cascade {
     fn raw_run_on_mldsa_good_surfaces_no_pqc_finding() {
         // Setup + Invoke.
         let cert = load_fixture("pqc_mldsa_good.pem");
-        let outcomes = default_registry().run(&cert);
+        let outcomes = default_registry_with_now(Some(TEST_NOW)).run(&cert);
 
         // Find: every (lint_id, finding) pair from the pqc-sourced outcomes only.
         let pqc: Vec<(&str, &Finding)> = outcomes

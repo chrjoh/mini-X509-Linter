@@ -3,39 +3,43 @@
 # Regenerates the certificate fixtures used by the linter test suite.
 #
 # Required tooling:
-#   - openssl 3.x (tested with OpenSSL 3.6.2)
-#   - bash, dd, xxd (for the one byte-patched fixture)
+#   - openssl 3.5+ (tested with OpenSSL 3.6.2; 3.5+ needed for ML-DSA / SLH-DSA)
+#   - bash, dd, xxd, python3 (for the byte-patched fixtures)
 #
 # Usage:
 #   ./testdata/generate.sh
 #
 # ============================================================================
-# ⚠️  TIME-FRAGILITY WARNING — READ BEFORE TOUCHING THESE FIXTURES  ⚠️
+# FIXED VALIDITY DATES — NOT TIME-FRAGILE (the test suite pins the clock)
 # ============================================================================
 # Feature 05 (CA/Browser Forum BR lints) introduced BROAD scoping: the four BR
 # lints apply to EVERY non-CA leaf. One of them, cabf_br_validity_max_398_days,
 # requires a leaf's validity window to be BOTH <= 398 days AND currently valid
 # (notAfter in the future). A short window cannot also be far-future, so the
-# BR-compliant leaves below use a fixed, currently-valid <=398-day window:
+# BR-compliant leaves below use a fixed, <=398-day window:
 #
 #     BR_OK:  2026-06-01  ->  2027-06-01   (365 days)
 #
-# These leaves EXPIRE on 2027-06-01. After that date hygiene_not_expired fires
-# on good.pem and on every per-rule leaf fixture, breaking the "exactly one rule
-# fires" isolation tests WHOLESALE (a flood of not_expired failures).
+# These leaves expire on 2027-06-01 in WALL-CLOCK terms, but that does NOT make
+# the fixtures time-fragile: the test suite pins the reference clock to a fixed
+# instant inside every window (via `--now <RFC3339>` on the CLI and
+# `default_registry_with_now(...)` in the library), so hygiene_not_expired
+# evaluates against that pinned "now" — never against the machine clock. The
+# fixtures therefore do NOT need annual regeneration; the fixed dates exist only
+# for byte-reproducibility (so a regen produces the same windows/serials).
 #
-#   >>> REGENERATE ANNUALLY (slide the windows forward) BEFORE 2027-06-01. <<<
-#
-# The cabf_br_validity_400_days fixture uses 2026-06-01 -> 2027-07-06 (400 days,
-# also currently valid) and has a slightly later horizon, but the same chore.
+# The cabf_br_validity_400_days fixture uses 2026-06-01 -> 2027-07-06 (400 days)
+# to isolate cabf_br_validity_max_398_days against the same pinned clock.
 #
 # Two dating strategies were considered:
 #   (a) Fixed dates (chosen here): the committed bytes are reproducible across
-#       regenerations, but require the annual manual slide above.
+#       regenerations, and the pinned test clock makes them clock-independent.
 #   (b) Relative dates (openssl -days 365): self-healing on regen (always
 #       relative to "now"), but the committed bytes drift every regeneration,
-#       making fixture diffs noisy and the checked-in window non-deterministic.
-# We keep fixed dates for reproducibility and accept the annual-regen chore.
+#       making fixture diffs noisy and the checked-in window non-deterministic,
+#       and the pinned-clock tests would then need recomputed reference instants.
+# We keep fixed dates for reproducibility; the pinned clock removes the old
+# annual-regen chore entirely.
 # ============================================================================
 #
 # Output (written next to this script):
@@ -734,21 +738,433 @@ sign_csr "$HERE/cabf_br_country_not_iso.pem" "/C=ZZ/CN=country-iso.example.com" 
   "$BR_OK_NB" "$BR_OK_NA" "$EXT_COUNTRY_ISO"
 
 # ===========================================================================
-# ⚠️  Feature 09: CA/Browser Forum CODE-SIGNING Baseline Requirements fixtures
+# Feature 10: CA/Browser Forum S/MIME Baseline Requirements fixtures
 # ===========================================================================
-# ⚠️  TIME-FRAGILITY — READ ME — these fixtures EXPIRE ~2027-06-01.  ⚠️
+# The twelve cabf_smime_*.pem fixtures exercise the emailProtection-gated S/MIME
+# lint source. Each is a SELF-SIGNED (subject == issuer) RSA-2048 / SHA-256 leaf
+# that is S/MIME-compliant EXCEPT its one target violation. Shared shape:
+#   - subject DN = /C=US/CN=<...>/emailAddress=user@example.com (stored order
+#     C, CN, emailAddress)
+#   - basicConstraints = CA:FALSE
+#   - extendedKeyUsage = emailProtection
+#   - keyUsage = critical, digitalSignature + keyEncipherment
+#   - subjectKeyIdentifier = hash; authorityKeyIdentifier = keyid (== SKI, since
+#     self-signed)
+#   - crlDistributionPoints = URI:http://crl.example.com/smime.crl
+#   - subjectAltName = email:user@example.com
+# Extension order as emitted: BC, EKU, KU, SKI, AKI, CRL-DP, SAN.
+#
+# Shape was determined by `openssl x509 -text` over each committed fixture; the
+# self-signed-with-keyid AKI and the per-fixture deviation each fixture's name
+# encodes were read directly from the committed bytes.
+#
+# Fixed dates: all twelve use the BR_OK window (clock pinned by the test suite,
+# see the header note) so hygiene_not_expired stays quiet against the pinned now.
+#
+# Serials: good=100, no_san=101, san_critical=102, cn_email_not_in_san=103,
+# two_email_subject=104, no_key_usage=105, key_usage_not_critical=106,
+# eku_server_auth=108, no_aki=109, no_crl_dp=110, crl_dp_ldap=111,
+# bad_country=112 (serial 107 is intentionally unused — matches the committed set).
+#
+# bad_country is the ONE DER-byte-patched S/MIME fixture: openssl rejects a
+# 3-character countryName via -subj (PrintableString maxsize=2), so a C=US
+# self-signed cert is built and the SUBJECT countryName value is rewritten in the
+# DER from "US" (13 02 55 53) to "USA" (13 03 55 53 41), recomputing every
+# enclosing definite-length header. The ISSUER country stays "US" (only the first
+# of the two country TLVs is left unpatched), so subject=C=USA / issuer=C=US,
+# exactly as in the committed fixture. The length-changing patch invalidates the
+# signature, which is irrelevant to a structural linter.
+
+# One RSA-2048 key shared across all twelve S/MIME fixtures (their SKI is
+# therefore identical — the S/MIME lints do not assert SKI uniqueness).
+SMIME_KEY="$(mktemp)"
+openssl genrsa -out "$SMIME_KEY" 2048 2>/dev/null
+
+# make_smime_ext <out> <ku> <crl_dp|""> <san_line|""> [eku_override]
+#
+# Writes an S/MIME leaf extension config in the canonical extension order
+# (BC, EKU, KU, SKI, AKI, CRL-DP, SAN). $ku is the keyUsage value (set "" to omit
+# the KU extension entirely). $crl_dp is a full crlDistributionPoints value (e.g.
+# "URI:http://...") or "" to omit CRL-DP. $san_line is a full subjectAltName value
+# (e.g. "email:user@example.com" or "critical,email:user@example.com") or "" to
+# omit the SAN. $5 (optional) overrides the extendedKeyUsage VALUE in its normal
+# slot (default "emailProtection").
+make_smime_ext() {
+  local out="$1" ku="$2" crl="$3" san="$4" eku="${5:-emailProtection}"
+  {
+    printf 'basicConstraints=CA:FALSE\n'
+    printf 'extendedKeyUsage=%s\n' "$eku"
+    if [[ -n "$ku" ]]; then
+      printf 'keyUsage=%s\n' "$ku"
+    fi
+    printf 'subjectKeyIdentifier=hash\n'
+    printf 'authorityKeyIdentifier=keyid:always\n'
+    if [[ -n "$crl" ]]; then
+      printf 'crlDistributionPoints=%s\n' "$crl"
+    fi
+    if [[ -n "$san" ]]; then
+      printf 'subjectAltName=%s\n' "$san"
+    fi
+  } >"$out"
+}
+
+# sign_smime <out.pem> <subject> <serial> <extfile>
+#
+# Self-signs an S/MIME CSR built from $SMIME_KEY (RSA-2048, SHA-256) with the
+# BR_OK window. Self-signed so AKI keyid == SKI.
+sign_smime() {
+  local out="$1" subj="$2" serial="$3" extfile="$4"
+  local csr
+  csr="$(mktemp)"
+  openssl req -new -key "$SMIME_KEY" -subj "$subj" -out "$csr" 2>/dev/null
+  openssl x509 -req -in "$csr" -signkey "$SMIME_KEY" -out "$out" \
+    -set_serial "$serial" -not_before "$BR_OK_NB" -not_after "$BR_OK_NA" -sha256 \
+    -extfile "$extfile" 2>/dev/null
+  rm -f "$csr"
+  echo "wrote $out"
+}
+
+SMIME_CRL="URI:http://crl.example.com/smime.crl"
+SMIME_KU="critical,digitalSignature,keyEncipherment"
+
+# cabf_smime_good: clean S/MIME leaf, passes every S/MIME lint.
+EXT_SM_GOOD="$(new_ext)"
+make_smime_ext "$EXT_SM_GOOD" "$SMIME_KU" "$SMIME_CRL" "email:user@example.com"
+sign_smime "$HERE/cabf_smime_good.pem" "/C=US/CN=user@example.com/emailAddress=user@example.com" \
+  100 "$EXT_SM_GOOD"
+
+# cabf_smime_no_san: SAN omitted entirely.
+EXT_SM_NOSAN="$(new_ext)"
+make_smime_ext "$EXT_SM_NOSAN" "$SMIME_KU" "$SMIME_CRL" ""
+sign_smime "$HERE/cabf_smime_no_san.pem" "/C=US/CN=No San User/emailAddress=user@example.com" \
+  101 "$EXT_SM_NOSAN"
+
+# cabf_smime_san_critical: SAN marked critical.
+EXT_SM_SANCRIT="$(new_ext)"
+make_smime_ext "$EXT_SM_SANCRIT" "$SMIME_KU" "$SMIME_CRL" "critical,email:user@example.com"
+sign_smime "$HERE/cabf_smime_san_critical.pem" "/C=US/CN=user@example.com/emailAddress=user@example.com" \
+  102 "$EXT_SM_SANCRIT"
+
+# cabf_smime_cn_email_not_in_san: CN is an email (cn-only@) absent from the SAN
+# (SAN lists a DIFFERENT address other@).
+EXT_SM_CNNOTIN="$(new_ext)"
+make_smime_ext "$EXT_SM_CNNOTIN" "$SMIME_KU" "$SMIME_CRL" "email:other@example.com"
+sign_smime "$HERE/cabf_smime_cn_email_not_in_san.pem" \
+  "/C=US/CN=cn-only@example.com/emailAddress=user@example.com" 103 "$EXT_SM_CNNOTIN"
+
+# cabf_smime_two_email_subject: subject carries TWO emailAddress RDNs.
+EXT_SM_TWOEMAIL="$(new_ext)"
+make_smime_ext "$EXT_SM_TWOEMAIL" "$SMIME_KU" "$SMIME_CRL" "email:user@example.com"
+sign_smime "$HERE/cabf_smime_two_email_subject.pem" \
+  "/C=US/CN=Two Email User/emailAddress=user@example.com/emailAddress=second@example.com" \
+  104 "$EXT_SM_TWOEMAIL"
+
+# cabf_smime_no_key_usage: KU extension omitted entirely.
+EXT_SM_NOKU="$(new_ext)"
+make_smime_ext "$EXT_SM_NOKU" "" "$SMIME_CRL" "email:user@example.com"
+sign_smime "$HERE/cabf_smime_no_key_usage.pem" "/C=US/CN=No KU User/emailAddress=user@example.com" \
+  105 "$EXT_SM_NOKU"
+
+# cabf_smime_key_usage_not_critical: KU present but NOT critical.
+EXT_SM_KUNONCRIT="$(new_ext)"
+make_smime_ext "$EXT_SM_KUNONCRIT" "digitalSignature,keyEncipherment" "$SMIME_CRL" "email:user@example.com"
+sign_smime "$HERE/cabf_smime_key_usage_not_critical.pem" \
+  "/C=US/CN=KU NonCrit User/emailAddress=user@example.com" 106 "$EXT_SM_KUNONCRIT"
+
+# cabf_smime_eku_server_auth: EKU adds serverAuth alongside emailProtection
+# (prohibited for S/MIME), kept in the canonical EKU slot via the override.
+EXT_SM_EKUSA="$(new_ext)"
+make_smime_ext "$EXT_SM_EKUSA" "$SMIME_KU" "$SMIME_CRL" "email:user@example.com" \
+  "emailProtection,serverAuth"
+sign_smime "$HERE/cabf_smime_eku_server_auth.pem" \
+  "/C=US/CN=Server Auth User/emailAddress=user@example.com" 108 "$EXT_SM_EKUSA"
+
+# cabf_smime_no_aki: AuthorityKeyIdentifier omitted. Built via the extra-line
+# slot so the default AKI line is replaced by the EKU line ONLY.
+EXT_SM_NOAKI="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=emailProtection\n'
+  printf 'keyUsage=%s\n' "$SMIME_KU"
+  printf 'subjectKeyIdentifier=hash\n'
+  printf 'crlDistributionPoints=%s\n' "$SMIME_CRL"
+  printf 'subjectAltName=email:user@example.com\n'
+} >"$EXT_SM_NOAKI"
+sign_smime "$HERE/cabf_smime_no_aki.pem" "/C=US/CN=No AKI User/emailAddress=user@example.com" \
+  109 "$EXT_SM_NOAKI"
+
+# cabf_smime_no_crl_dp: CRL distribution points omitted.
+EXT_SM_NOCRL="$(new_ext)"
+make_smime_ext "$EXT_SM_NOCRL" "$SMIME_KU" "" "email:user@example.com"
+sign_smime "$HERE/cabf_smime_no_crl_dp.pem" "/C=US/CN=No CRL User/emailAddress=user@example.com" \
+  110 "$EXT_SM_NOCRL"
+
+# cabf_smime_crl_dp_ldap: CRL-DP uses an ldap:// URI instead of http://.
+EXT_SM_CRLLDAP="$(new_ext)"
+make_smime_ext "$EXT_SM_CRLLDAP" "$SMIME_KU" "URI:ldap://crl.example.com/smime.crl" "email:user@example.com"
+sign_smime "$HERE/cabf_smime_crl_dp_ldap.pem" "/C=US/CN=Ldap Crl User/emailAddress=user@example.com" \
+  111 "$EXT_SM_CRLLDAP"
+
+# cabf_smime_bad_country: subject countryName "USA" (3 chars). openssl rejects
+# C=USA via -subj, so build a C=US self-signed cert and DER-patch the SUBJECT
+# country value US -> USA (issuer left as US), recomputing enclosing lengths.
+EXT_SM_BADC="$(new_ext)"
+make_smime_ext "$EXT_SM_BADC" "$SMIME_KU" "$SMIME_CRL" "email:user@example.com"
+SM_BADC_V3="$(mktemp)"
+SM_BADC_DER="$(mktemp)"
+sign_smime "$SM_BADC_V3" "/C=US/CN=Bad Country User/emailAddress=user@example.com" 112 "$EXT_SM_BADC"
+openssl x509 -in "$SM_BADC_V3" -outform DER -out "$SM_BADC_DER"
+python3 - "$SM_BADC_DER" <<'PY'
+import sys
+
+def read_len(b, i):
+    f = b[i]; i += 1
+    if f < 0x80:
+        return f, i
+    n = f & 0x7f
+    return int.from_bytes(b[i:i + n], 'big'), i + n
+
+path = sys.argv[1]
+orig = bytearray(open(path, 'rb').read())
+pat = bytes.fromhex("13025553")  # PrintableString, len 2, "US"
+first = orig.find(pat)
+second = orig.find(pat, first + 1)
+if first < 0 or second < 0:
+    sys.exit("ERROR: could not find both issuer+subject country TLVs to patch")
+vstart = second  # patch the SUBJECT country (second occurrence); leave ISSUER "US".
+
+# Collect every CONSTRUCTED ancestor header whose content range contains vstart.
+ancestors = []
+
+def rec(start, end):
+    i = start
+    while i < end:
+        tag = orig[i]
+        ln, c = read_len(orig, i + 1)
+        e = c + ln
+        if c <= vstart < e:
+            if tag & 0x20:  # constructed
+                ancestors.append(i)
+                rec(c, e)
+        i = e
+
+rec(0, len(orig))
+
+# Splice "US" -> "USA": 13 02 55 53 -> 13 03 55 53 41 (+1 byte).
+delta = 1
+data = bytearray(orig[:vstart] + bytes.fromhex("1303555341") + orig[vstart + 4:])
+
+def bump(b, i):
+    f = b[i + 1]
+    if f < 0x80:
+        b[i + 1] = (f + delta) & 0xff
+    else:
+        n = f & 0x7f
+        v = int.from_bytes(b[i + 2:i + 2 + n], 'big') + delta
+        b[i + 2:i + 2 + n] = v.to_bytes(n, 'big')
+
+for a in sorted(set(ancestors)):
+    bump(data, a)
+open(path, 'wb').write(data)
+PY
+openssl x509 -inform DER -in "$SM_BADC_DER" -outform PEM -out "$HERE/cabf_smime_bad_country.pem"
+echo "wrote $HERE/cabf_smime_bad_country.pem (subject countryName patched US -> USA)"
+rm -f "$SM_BADC_V3" "$SM_BADC_DER"
+
+# ===========================================================================
+# Feature 11: CA/Browser Forum EXTENDED VALIDATION (EV) fixtures
+# ===========================================================================
+# The ten cabf_ev_*.pem fixtures exercise the EV-policy-gated lint source. Each
+# is a SELF-SIGNED (subject == issuer) RSA-2048 / SHA-256 serverAuth leaf that is
+# EV-compliant EXCEPT its one target violation. Shared shape:
+#   - subject DN (stored order): C=US, jurisdictionCountryName=US
+#     (1.3.6.1.4.1.311.60.2.1.3), businessCategory=Private Organization,
+#     O=Example EV Inc, serialNumber=REG-12345,
+#     organizationIdentifier=NTRUS-12345, CN=ev.example.com
+#   - basicConstraints = CA:FALSE
+#   - extendedKeyUsage = serverAuth
+#   - certificatePolicies = the EV marker OID 1.3.6.1.4.1.99999.1.1
+#   - subjectAltName = DNS:ev.example.com
+#   - subjectKeyIdentifier = hash; NO AKI, NO CRL-DP.
+# Extension order as emitted: BC, EKU, certPolicies, SAN, SKI.
+#
+# Shape was determined by `openssl x509 -text -nameopt multiline` over each
+# committed fixture: the stored DN attribute order, the EV policy OID, the
+# serverAuth EKU, the absence of AKI/CRL-DP, and the per-fixture deviation each
+# fixture's name encodes were all read from the committed bytes.
+#
+# Fixed dates: nine use the BR_OK window; cabf_ev_validity_400_days uses VAL400
+# (2026-06-01 -> 2027-07-06). Clock pinned by the test suite (see header note).
+#
+# Serials: good=110, org_name_missing=111, business_category_missing=112,
+# business_category_invalid=113, jurisdiction_country_missing=114,
+# serial_number_missing=115, wildcard_san=116, san_ip=117, validity_400_days=118,
+# org_id_missing=119.
+
+# One RSA-2048 key shared across all ten EV fixtures.
+EV_KEY="$(mktemp)"
+openssl genrsa -out "$EV_KEY" 2048 2>/dev/null
+
+# The EV marker policy OID. The EV lint source self-gates on this OID being
+# present in certificatePolicies.
+EV_POLICY_OID="1.3.6.1.4.1.99999.1.1"
+
+# make_ev_ext <out> <san_line>
+#
+# Writes an EV serverAuth leaf extension config with the EV policy OID. $san_line
+# is a full subjectAltName value (e.g. "DNS:ev.example.com").
+make_ev_ext() {
+  local out="$1" san="$2"
+  {
+    printf 'basicConstraints=CA:FALSE\n'
+    printf 'extendedKeyUsage=serverAuth\n'
+    printf 'certificatePolicies=%s\n' "$EV_POLICY_OID"
+    printf 'subjectAltName=%s\n' "$san"
+    printf 'subjectKeyIdentifier=hash\n'
+  } >"$out"
+}
+
+# sign_ev <out.pem> <subject> <serial> <not_before> <not_after> <extfile>
+#
+# Self-signs an EV CSR built from $EV_KEY (RSA-2048, SHA-256).
+sign_ev() {
+  local out="$1" subj="$2" serial="$3" nb="$4" na="$5" extfile="$6"
+  local csr
+  csr="$(mktemp)"
+  openssl req -new -key "$EV_KEY" -subj "$subj" -out "$csr" 2>/dev/null
+  openssl x509 -req -in "$csr" -signkey "$EV_KEY" -out "$out" \
+    -set_serial "$serial" -not_before "$nb" -not_after "$na" -sha256 \
+    -extfile "$extfile" 2>/dev/null
+  rm -f "$csr"
+  echo "wrote $out"
+}
+
+# Full EV subject DN building blocks (subject is passed as a single -subj string;
+# openssl emits them in the order written, which matches the committed fixtures).
+EV_C="/C=US"
+EV_JC="/jurisdictionC=US"
+EV_BC="/businessCategory=Private Organization"
+EV_O="/O=Example EV Inc"
+EV_SN="/serialNumber=REG-12345"
+EV_OI="/organizationIdentifier=NTRUS-12345"
+EV_CN="/CN=ev.example.com"
+
+EV_SAN="DNS:ev.example.com"
+
+# cabf_ev_good: full EV subject + EV policy + serverAuth. Passes every EV lint.
+EXT_EV_GOOD="$(new_ext)"
+make_ev_ext "$EXT_EV_GOOD" "$EV_SAN"
+sign_ev "$HERE/cabf_ev_good.pem" "${EV_C}${EV_JC}${EV_BC}${EV_O}${EV_SN}${EV_OI}${EV_CN}" \
+  110 "$BR_OK_NB" "$BR_OK_NA" "$EXT_EV_GOOD"
+
+# cabf_ev_org_name_missing: organizationName (O) omitted.
+EXT_EV_NOORG="$(new_ext)"
+make_ev_ext "$EXT_EV_NOORG" "$EV_SAN"
+sign_ev "$HERE/cabf_ev_org_name_missing.pem" "${EV_C}${EV_JC}${EV_BC}${EV_SN}${EV_OI}${EV_CN}" \
+  111 "$BR_OK_NB" "$BR_OK_NA" "$EXT_EV_NOORG"
+
+# cabf_ev_business_category_missing: businessCategory omitted.
+EXT_EV_NOBC="$(new_ext)"
+make_ev_ext "$EXT_EV_NOBC" "$EV_SAN"
+sign_ev "$HERE/cabf_ev_business_category_missing.pem" "${EV_C}${EV_JC}${EV_O}${EV_SN}${EV_OI}${EV_CN}" \
+  112 "$BR_OK_NB" "$BR_OK_NA" "$EXT_EV_NOBC"
+
+# cabf_ev_business_category_invalid: businessCategory = "Sole Proprietor" (not one
+# of the four EV-permitted values).
+EXT_EV_BADBC="$(new_ext)"
+make_ev_ext "$EXT_EV_BADBC" "$EV_SAN"
+sign_ev "$HERE/cabf_ev_business_category_invalid.pem" \
+  "${EV_C}${EV_JC}/businessCategory=Sole Proprietor${EV_O}${EV_SN}${EV_OI}${EV_CN}" \
+  113 "$BR_OK_NB" "$BR_OK_NA" "$EXT_EV_BADBC"
+
+# cabf_ev_jurisdiction_country_missing: jurisdictionCountryName omitted.
+EXT_EV_NOJC="$(new_ext)"
+make_ev_ext "$EXT_EV_NOJC" "$EV_SAN"
+sign_ev "$HERE/cabf_ev_jurisdiction_country_missing.pem" "${EV_C}${EV_BC}${EV_O}${EV_SN}${EV_OI}${EV_CN}" \
+  114 "$BR_OK_NB" "$BR_OK_NA" "$EXT_EV_NOJC"
+
+# cabf_ev_serial_number_missing: subject serialNumber attribute omitted.
+EXT_EV_NOSN="$(new_ext)"
+make_ev_ext "$EXT_EV_NOSN" "$EV_SAN"
+sign_ev "$HERE/cabf_ev_serial_number_missing.pem" "${EV_C}${EV_JC}${EV_BC}${EV_O}${EV_OI}${EV_CN}" \
+  115 "$BR_OK_NB" "$BR_OK_NA" "$EXT_EV_NOSN"
+
+# cabf_ev_wildcard_san: SAN adds a wildcard DNS:*.ev.example.com (prohibited for EV).
+EXT_EV_WILD="$(new_ext)"
+make_ev_ext "$EXT_EV_WILD" "DNS:ev.example.com,DNS:*.ev.example.com"
+sign_ev "$HERE/cabf_ev_wildcard_san.pem" "${EV_C}${EV_JC}${EV_BC}${EV_O}${EV_SN}${EV_OI}${EV_CN}" \
+  116 "$BR_OK_NB" "$BR_OK_NA" "$EXT_EV_WILD"
+
+# cabf_ev_san_ip: SAN adds IP:8.8.8.8 (an IP address is prohibited for EV). NOTE:
+# 8.8.8.8 is a PUBLIC routable address (NOT a reserved-range IP like 192.0.2.10),
+# so it trips the EV no-IP-SAN rule WITHOUT also tripping any reserved-IP lint.
+EXT_EV_IP="$(new_ext)"
+make_ev_ext "$EXT_EV_IP" "DNS:ev.example.com,IP:8.8.8.8"
+sign_ev "$HERE/cabf_ev_san_ip.pem" "${EV_C}${EV_JC}${EV_BC}${EV_O}${EV_SN}${EV_OI}${EV_CN}" \
+  117 "$BR_OK_NB" "$BR_OK_NA" "$EXT_EV_IP"
+
+# cabf_ev_validity_400_days: VAL400 window (2026-06-01 -> 2027-07-06, > the EV
+# validity ceiling). Otherwise EV-compliant.
+EXT_EV_VAL400="$(new_ext)"
+make_ev_ext "$EXT_EV_VAL400" "$EV_SAN"
+sign_ev "$HERE/cabf_ev_validity_400_days.pem" "${EV_C}${EV_JC}${EV_BC}${EV_O}${EV_SN}${EV_OI}${EV_CN}" \
+  118 "$VAL400_NB" "$VAL400_NA" "$EXT_EV_VAL400"
+
+# cabf_ev_org_id_missing: organizationIdentifier omitted.
+EXT_EV_NOOI="$(new_ext)"
+make_ev_ext "$EXT_EV_NOOI" "$EV_SAN"
+sign_ev "$HERE/cabf_ev_org_id_missing.pem" "${EV_C}${EV_JC}${EV_BC}${EV_O}${EV_SN}${EV_CN}" \
+  119 "$BR_OK_NB" "$BR_OK_NA" "$EXT_EV_NOOI"
+
+# ===========================================================================
+# leaf_no_server_auth.pem — clientAuth-only leaf (purpose-resolution tests)
+# ===========================================================================
+# Used by crates/cli/tests/purpose.rs: a self-signed non-CA leaf, RSA-2048 /
+# SHA-256, v3, that carries extendedKeyUsage=clientAuth (NO serverAuth), a SAN
+# whose dNSName == CN, and an SKI. Because it resolves to a non-serverAuth
+# purpose, it must NOT trip any cabf_br lint under the purpose-gated engine.
+#
+# Shape (from `openssl x509 -text`): serial 51, CN=no-server-auth.example.com,
+# VAL400 window (2026-06-01 -> 2027-07-06), CA:FALSE, EKU clientAuth, SKI hash,
+# SAN DNS:no-server-auth.example.com, no KU, no AKI. Its own RSA-2048 key.
+LNSA_KEY="$(mktemp)"
+openssl genrsa -out "$LNSA_KEY" 2048 2>/dev/null
+EXT_LNSA="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=clientAuth\n'
+  printf 'subjectAltName=DNS:no-server-auth.example.com\n'
+  printf 'subjectKeyIdentifier=hash\n'
+} >"$EXT_LNSA"
+LNSA_CSR="$(mktemp)"
+openssl req -new -key "$LNSA_KEY" -subj "/CN=no-server-auth.example.com" -out "$LNSA_CSR" 2>/dev/null
+openssl x509 -req -in "$LNSA_CSR" -signkey "$LNSA_KEY" -out "$HERE/leaf_no_server_auth.pem" \
+  -set_serial 51 -not_before "$VAL400_NB" -not_after "$VAL400_NA" -sha256 \
+  -extfile "$EXT_LNSA" 2>/dev/null
+echo "wrote $HERE/leaf_no_server_auth.pem (clientAuth-only leaf)"
+rm -f "$LNSA_CSR"
+
+cleanup_feature_10_11() {
+  rm -f "$SMIME_KEY" "$EV_KEY" "$LNSA_KEY"
+}
+cleanup_feature_10_11
+
+# ===========================================================================
+# Feature 09: CA/Browser Forum CODE-SIGNING Baseline Requirements fixtures
+# ===========================================================================
+# FIXED DATES — NOT TIME-FRAGILE (the test suite pins the clock).
 # ---------------------------------------------------------------------------
-# The eight cabf_cs_*.pem fixtures use currently-valid windows so that
-# hygiene_not_expired stays quiet (notAfter in the future). The non-validity
-# fixtures use the CS_OK window 2026-06-01 -> 2027-06-01 (365d, <=460d). The two
-# validity-violating fixtures straddle "now":
+# The eight cabf_cs_*.pem fixtures use fixed windows chosen so that, against the
+# PINNED reference clock, hygiene_not_expired stays quiet (notAfter after the
+# pinned "now"). The non-validity fixtures use the CS_OK window
+# 2026-06-01 -> 2027-06-01 (365d, <=460d). The two validity-violating fixtures
+# bracket the pinned "now":
 #     cabf_cs_validity_40_months  2024-06-01 -> 2027-10-01  (~40 months, >1188d)
 #     cabf_cs_validity_500_days   2026-02-01 -> 2027-06-16  (500d, >460d, <=39mo)
-# ALL of them EXPIRE in 2027. After 2027-06-01 (and 2027-10-01 for the 40-month
-# fixture) hygiene_not_expired fires on the CS fixtures and the cabf_cs isolation
-# tests (crates/linter/tests/cabf_cs.rs) break wholesale.
-#
-#   >>> REGENERATE ANNUALLY (slide the CS windows forward) BEFORE 2027-06-01. <<<
+# Because the cabf_cs isolation tests (crates/linter/tests/cabf_cs.rs) pin the
+# reference clock to a fixed instant inside the CS windows, hygiene_not_expired
+# is evaluated against that pinned "now" — not the wall clock — so these fixtures
+# do NOT need annual regeneration. The fixed dates are kept for byte-reproducibility.
 #
 # Scoping note: the CS lints are NARROW (codeSigning-EKU-gated). Every CS leaf
 # carries extendedKeyUsage=codeSigning, keyUsage=digitalSignature (critical),
@@ -892,12 +1308,12 @@ sign_cs "$HERE/cabf_cs_no_crl.pem" "$CS_RSA3072_KEY" \
 #     NEVER with the user's cert-bar tool. The linter must remain an independent
 #     checker over cert-bar's PQC output.
 #
-# ⚠️  TIME-FRAGILITY: the two clean PQC leaves (and every violating PQC leaf)
-#     use the BR_OK window (2026-06-01 -> 2027-06-01) so they straddle "now" and
-#     ONLY the single intended pqc rule fires (not hygiene_not_expired). They
-#     EXPIRE 2027-06-01 — REGENERATE ANNUALLY together with the BR_OK fixtures
-#     above (same chore, same window). After expiry, hygiene_not_expired fires
-#     on these leaves and the pqc.rs isolation tests break wholesale.
+# ℹ️  FIXED DATES — NOT TIME-FRAGILE: the two clean PQC leaves (and every
+#     violating PQC leaf) use the BR_OK window (2026-06-01 -> 2027-06-01) so that,
+#     against the PINNED reference clock used by the pqc.rs isolation tests, ONLY
+#     the single intended pqc rule fires (not hygiene_not_expired). Because the
+#     clock is pinned (not the wall clock), these fixtures do NOT need annual
+#     regeneration; the fixed window is kept for byte-reproducibility.
 #
 # Fixtures produced (7):
 #   - pqc_mldsa_good.pem        clean ML-DSA-65 leaf (openssl-native). Passes all
@@ -1191,13 +1607,14 @@ rm -f "$SLH_CA_KEY"
 # (chain_pqc_valid.pem) needs openssl >= 3.6.2 (ML-DSA support); if the host
 # lacks it that one fixture cannot be regenerated (the others are classical).
 #
-# ⚠️ TIME-FRAGILITY: all chain fixtures use the BR_OK-aligned window
-#     2026-06-01 -> 2027-06-01
+# ℹ️ FIXED DATES — NOT TIME-FRAGILE: all chain fixtures use the BR_OK-aligned
+#     window 2026-06-01 -> 2027-06-01
 # EXCEPT chain_validity_not_nested.pem, whose LEAF deliberately runs to
-# 2027-09-01 (past the issuer's notAfter) to trip chain_validity_nested. They
-# EXPIRE ~2027-06-01; after that hygiene_not_expired fires in the PER-CERT pass
-# over these fixtures. The chain LINTS themselves are clock-independent.
-#   >>> REGENERATE ANNUALLY (slide the windows forward) BEFORE 2027-06-01. <<<
+# 2027-09-01 (past the issuer's notAfter) to trip chain_validity_nested. The
+# per-cert pass over these fixtures evaluates hygiene_not_expired against the
+# PINNED reference clock (not the wall clock), and the chain LINTS themselves are
+# clock-independent, so these fixtures do NOT need annual regeneration; the fixed
+# windows are kept for byte-reproducibility.
 #
 # DETERMINISM: fixed serials (4xx) and fixed validity windows are pinned so the
 # committed bytes are reproducible. (RSA/EC keys are random, so the exact bytes
@@ -1450,6 +1867,69 @@ openssl x509 -req -in "$(CW p5leaf.csr)" -CA "$(CW p5inter.pem)" -CAkey "$(CW p5
   -set_serial 493 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW p5leaf.ext)" -sha512 -out "$(CW p5leaf.pem)" >/dev/null 2>&1
 cat "$(CW p5leaf.pem)" "$(CW p5inter.pem)" "$(CW p5root.pem)" > "$HERE/chain_unsupported_sig_alg.pem"
 echo "wrote $HERE/chain_unsupported_sig_alg.pem (P-521 / ecdsa-with-SHA512 -> chain_signature_valid Notice, fail-open)"
+
+# ===========================================================================
+# Feature 15 link chain: crates/linter/src/chain_testdata/{link_*}.pem
+# ===========================================================================
+# The chain-link unit tests `include_bytes!` these four fixtures from
+# crates/linter/src/chain_testdata/ (NOT testdata/), so they are written there.
+# They form a REAL linked, signature-verifying chain plus one unrelated stray CA:
+#   - link_root.pem   (serial 1) self-signed CN=Chain Link Root CA, critical
+#                     CA:TRUE, KU keyCertSign+cRLSign, SKI hash, AKI keyid (==SKI).
+#   - link_inter.pem  (serial 2) issued by root, critical CA:TRUE pathlen:0, KU
+#                     keyCertSign+cRLSign, SKI hash, AKI = root keyid.
+#   - link_leaf.pem   (serial 3) issued by inter, critical CA:FALSE, KU
+#                     digitalSignature+keyEncipherment, EKU serverAuth, SKI hash,
+#                     AKI = inter keyid, SAN DNS:link-leaf.example.com.
+#   - link_stray.pem  (serial 9) self-signed CN=Unrelated Stray CA, critical
+#                     CA:TRUE, KU keyCertSign ONLY (no cRLSign), SKI hash, AKI
+#                     keyid (==SKI). Links to nothing in the test chain.
+# All four use the BR_OK-aligned CHAIN window (2026-06-01 -> 2027-06-01). Shape
+# read from `openssl x509 -text` over each committed fixture (serials, the leaf's
+# AKI==inter SKI linkage, and the stray's keyCertSign-only KU).
+LINK_DIR="$HERE/../crates/linter/src/chain_testdata"
+
+# link_root: self-signed root CA.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW link_root.key)" >/dev/null 2>&1
+openssl req -x509 -new -key "$(CW link_root.key)" -sha256 \
+  -subj "/CN=Chain Link Root CA" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" -addext "authorityKeyIdentifier=keyid" \
+  -set_serial 1 -not_before $CHAIN_NB -not_after $CHAIN_NA \
+  -out "$LINK_DIR/link_root.pem" >/dev/null 2>&1
+echo "wrote $LINK_DIR/link_root.pem (self-signed Chain Link Root CA)"
+
+# link_inter: intermediate CA (pathlen:0) issued by link_root.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW link_inter.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW link_inter.key)" -subj "/CN=Chain Link Intermediate CA" \
+  -out "$(CW link_inter.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW link_inter.ext)"
+openssl x509 -req -in "$(CW link_inter.csr)" -CA "$LINK_DIR/link_root.pem" -CAkey "$(CW link_root.key)" \
+  -set_serial 2 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW link_inter.ext)" \
+  -sha256 -out "$LINK_DIR/link_inter.pem" >/dev/null 2>&1
+echo "wrote $LINK_DIR/link_inter.pem (intermediate CA issued by link_root)"
+
+# link_leaf: serverAuth leaf issued by link_inter.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW link_leaf.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW link_leaf.key)" -subj "/CN=link-leaf.example.com" \
+  -out "$(CW link_leaf.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\nsubjectAltName=DNS:link-leaf.example.com\n' > "$(CW link_leaf.ext)"
+openssl x509 -req -in "$(CW link_leaf.csr)" -CA "$LINK_DIR/link_inter.pem" -CAkey "$(CW link_inter.key)" \
+  -set_serial 3 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW link_leaf.ext)" \
+  -sha256 -out "$LINK_DIR/link_leaf.pem" >/dev/null 2>&1
+echo "wrote $LINK_DIR/link_leaf.pem (serverAuth leaf issued by link_inter)"
+
+# link_stray: unrelated self-signed CA with keyCertSign-ONLY key usage.
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW link_stray.key)" >/dev/null 2>&1
+openssl req -x509 -new -key "$(CW link_stray.key)" -sha256 \
+  -subj "/CN=Unrelated Stray CA" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign" \
+  -addext "subjectKeyIdentifier=hash" -addext "authorityKeyIdentifier=keyid" \
+  -set_serial 9 -not_before $CHAIN_NB -not_after $CHAIN_NA \
+  -out "$LINK_DIR/link_stray.pem" >/dev/null 2>&1
+echo "wrote $LINK_DIR/link_stray.pem (unrelated self-signed stray CA, keyCertSign only)"
 
 # Throwaway keys/CSRs/configs are not committed.
 rm -rf "$CHAIN_WORK"

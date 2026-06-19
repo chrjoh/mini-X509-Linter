@@ -41,7 +41,13 @@ use linter::lints::rfc5280::{
     SubjectDnCountryNotPrintableString, UtcTimeNotInZulu, ValidityNotAfterAfterNotBefore,
     VersionIsV3,
 };
-use linter::{Applicability, Cert, Lint, Severity, default_registry};
+use linter::{Applicability, Cert, Lint, Severity, default_registry_with_now};
+
+/// A reference "now" inside every currently-valid fixture window (2026-12-01 in
+/// Unix seconds), used to pin the clock for full-registry runs that include the
+/// hygiene source so `hygiene_not_expired` cannot trip once the real date passes
+/// the fixtures' `notAfter` (all these leaves expire 2027-06-01).
+const TEST_NOW: i64 = 1_796_083_200;
 
 // `include_bytes!` resolves relative to this source file
 // (crates/linter/tests/rfc5280.rs); `../../../testdata` reaches the
@@ -608,7 +614,7 @@ mod default_registry_over_good {
     #[test]
     fn good_pem_yields_no_error_or_fatal_findings() {
         // Setup.
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(GOOD_PEM);
 
         // Invoke.
@@ -653,7 +659,7 @@ mod default_registry_over_good {
             ),
         ];
 
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
 
         for (pem, expected_lint) in cases {
             let cert = load_leaf(pem);
@@ -717,7 +723,7 @@ mod default_registry_over_good {
             (UTCTIME_NOT_ZULU_PEM, "rfc5280_utc_time_not_in_zulu"),
         ];
 
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
 
         for (pem, expected_lint) in cases {
             let cert = load_leaf(pem);
@@ -754,7 +760,7 @@ mod default_registry_over_good {
     /// raw-registry behaviour explicitly so the overlap is intentional, not silent.
     #[test]
     fn eku_empty_fixture_trips_new_rule_and_br_serverauth_under_raw_registry() {
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(EKU_EMPTY_PEM);
 
         let outcomes = registry.run(&cert);
@@ -782,7 +788,7 @@ mod default_registry_over_good {
     /// sub-cert SKI lint and nothing else.
     #[test]
     fn ski_missing_sub_cert_fixture_yields_one_warn() {
-        let registry = default_registry();
+        let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(SKI_MISSING_SUB_CERT_PEM);
 
         let outcomes = registry.run(&cert);

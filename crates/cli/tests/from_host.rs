@@ -354,8 +354,16 @@ struct Run {
     stdout: String,
 }
 
+/// A reference "now" (2026-12-01 in Unix seconds) inside the minted chain's leaf
+/// validity window (2022 → 2038). Pinning `--now` keeps the per-cert lint output
+/// (notably `hygiene_not_expired`) wall-clock independent — the minted leaf has a
+/// fixed `2038` `notAfter`, so without pinning the per-cert section would start
+/// expiring then; `--now` does not affect the `verification:` trust verdict.
+const TEST_NOW: &str = "1796083200";
+
 fn run(args: &[&str]) -> Run {
     let out = Command::new(BIN)
+        .args(["--now", TEST_NOW])
         .args(args)
         .output()
         .expect("spawn mini-x509-lint");
