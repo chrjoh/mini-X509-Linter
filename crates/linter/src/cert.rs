@@ -1979,18 +1979,20 @@ fn oid_name(oid: &Oid<'_>) -> Option<String> {
 }
 
 /// A best-effort human-readable name for a dotted OID that `oid-registry` does
-/// not know but which is a recognised post-quantum (ML-DSA / SLH-DSA) arc
-/// member with an assigned parameter set.
+/// not know but which is a recognised post-quantum arc member with an assigned
+/// parameter set: ML-DSA / SLH-DSA (the "sigAlgs" arc) **or** ML-KEM (the
+/// "kems" arc).
 ///
-/// Returns the FIPS short name (e.g. `SLH-DSA-SHA2-128s`) for a known parameter
-/// set, or `None` for any OID that is not a PQC arc member or whose slot is
-/// unassigned ([`PqcParamSet::Unknown`]). This lets the inspection accessors
-/// display a friendly name for PQC algorithms while never erroring on an
-/// unknown one.
+/// Returns the FIPS short name (e.g. `SLH-DSA-SHA2-128s`, `ML-KEM-768`) for a
+/// known parameter set, or `None` for any OID that is not a PQC arc member or
+/// whose slot is unassigned ([`PqcParamSet::Unknown`]). This lets the inspection
+/// accessors display a friendly name for PQC algorithms while never erroring on
+/// an unknown one.
 fn pqc_name_for_oid(dotted: &str) -> Option<String> {
-    match classify_pqc_oid(dotted)? {
+    match classify_pqc_oid(dotted).or_else(|| classify_mlkem_oid(dotted))? {
         PublicKeyAlg::MlDsa(PqcParamSet::Known(name))
-        | PublicKeyAlg::SlhDsa(PqcParamSet::Known(name)) => Some(name.to_string()),
+        | PublicKeyAlg::SlhDsa(PqcParamSet::Known(name))
+        | PublicKeyAlg::MlKem(PqcParamSet::Known(name)) => Some(name.to_string()),
         _ => None,
     }
 }
@@ -3561,9 +3563,29 @@ mod tests {
         }
 
         #[test]
+        fn known_ml_kem_slot_resolves_to_fips_name() {
+            // ML-KEM lives in the "kems" arc 2.16.840.1.101.3.4.4.{1,2,3}; the
+            // inspection summary must resolve it just like the sigAlgs arc.
+            assert_eq!(
+                pqc_name_for_oid("2.16.840.1.101.3.4.4.1").as_deref(),
+                Some("ML-KEM-512")
+            );
+            assert_eq!(
+                pqc_name_for_oid("2.16.840.1.101.3.4.4.2").as_deref(),
+                Some("ML-KEM-768")
+            );
+            assert_eq!(
+                pqc_name_for_oid("2.16.840.1.101.3.4.4.3").as_deref(),
+                Some("ML-KEM-1024")
+            );
+        }
+
+        #[test]
         fn unassigned_pqc_slot_has_no_name() {
             // .32..=.35 are reserved-but-unassigned SLH-DSA slots: no name.
             assert!(pqc_name_for_oid("2.16.840.1.101.3.4.3.32").is_none());
+            // Likewise an unassigned ML-KEM "kems" arc slot.
+            assert!(pqc_name_for_oid("2.16.840.1.101.3.4.4.9").is_none());
         }
 
         #[test]
