@@ -1,5 +1,6 @@
 ---
 source: crates/cli/tests/inspect.rs
+assertion_line: 154
 expression: out
 ---
 Certificate Summary
@@ -13,6 +14,8 @@ Certificate Summary
   Public Key:          SLH-DSA-SHA2-128s (2.16.840.1.101.3.4.3.20)
   Basic Constraints:   CA:true (critical)
   Key Usage:           Certificate Sign, CRL Sign (critical)
+  Subject Key Id:      3C:B2:20:74:AC:49:56:3D:94:72:6C:9A:22:9A:66:DD:51:70:10:01
+  Authority Key Id:    3C:B2:20:74:AC:49:56:3D:94:72:6C:9A:22:9A:66:DD:51:70:10:01
   Subject Alt Name:    DNS:slh-dsa-test-root (not critical)
 
 [rfc5280]

@@ -1,11 +1,13 @@
 ---
 source: crates/cli/tests/inspect.rs
+assertion_line: 707
 expression: summaries
 ---
 [
   {
     "certificate": "Certificate 1 (leaf)",
     "summary": {
+      "authority_key_id": null,
       "basic_constraints": {
         "ca": false,
         "critical": false,
@@ -36,6 +38,7 @@ expression: summaries
           }
         ]
       },
+      "subject_key_id": "2E:77:A6:45:4F:44:B8:80:60:A1:24:E6:62:9E:E5:82:D8:E6:BF:17",
       "validity": {
         "not_after": "Jun  1 00:00:00 2027 +00:00",
         "not_before": "Jun  1 00:00:00 2026 +00:00"
@@ -46,6 +49,7 @@ expression: summaries
   {
     "certificate": "Certificate 2",
     "summary": {
+      "authority_key_id": null,
       "basic_constraints": {
         "ca": true,
         "critical": true,
@@ -74,6 +78,7 @@ expression: summaries
       },
       "subject": "CN=Chain Test Root CA",
       "subject_alt_name": null,
+      "subject_key_id": "7A:D0:6E:50:00:3B:D3:AE:C0:17:53:66:8C:EB:0D:EE:14:BF:65:70",
       "validity": {
         "not_after": "Jan  1 00:00:00 2036 +00:00",
         "not_before": "Jan  1 00:00:00 2026 +00:00"

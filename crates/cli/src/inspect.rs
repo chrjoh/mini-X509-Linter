@@ -60,6 +60,13 @@ pub struct CertSummary {
     pub basic_constraints: Option<BasicConstraintsDisplay>,
     /// The Key Usage extension, or `None` when absent.
     pub key_usage: Option<KeyUsageDisplay>,
+    /// The Subject Key Identifier as uppercase, colon-separated hex, or `None`
+    /// when the extension is absent (or unreadable).
+    pub subject_key_id: Option<String>,
+    /// The Authority Key Identifier `keyIdentifier` as uppercase,
+    /// colon-separated hex, or `None` when absent (or no `keyIdentifier` is
+    /// present / unreadable).
+    pub authority_key_id: Option<String>,
     /// The Subject Alternative Name extension, or `None` when absent.
     pub subject_alt_name: Option<SanDisplay>,
 }
@@ -300,6 +307,20 @@ pub fn build_summary(cert: &Cert) -> CertSummary {
             critical: ku.critical,
         });
 
+    // SKI and the AKI keyIdentifier: an accessor Err and an absent extension
+    // both collapse to `None`, rendered as the absent marker (mirrors the
+    // BasicConstraints / KeyUsage / SAN handling above).
+    let subject_key_id = cert
+        .subject_key_id_bytes()
+        .ok()
+        .flatten()
+        .map(|b| hex_colon(&b));
+    let authority_key_id = cert
+        .authority_key_id_bytes()
+        .ok()
+        .flatten()
+        .map(|b| hex_colon(&b));
+
     let subject_alt_name = cert.san_entries().ok().flatten().map(|san| SanDisplay {
         entries: san
             .entries
@@ -322,8 +343,20 @@ pub fn build_summary(cert: &Cert) -> CertSummary {
         public_key,
         basic_constraints,
         key_usage,
+        subject_key_id,
+        authority_key_id,
         subject_alt_name,
     }
+}
+
+/// Renders bytes as uppercase, colon-separated hex (e.g. `9F:8D:A1:15`),
+/// matching the serial-number style used elsewhere in the summary.
+fn hex_colon(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// Builds the certificate summary as an owned [`serde_json::Value`] object.
@@ -332,8 +365,9 @@ pub fn build_summary(cert: &Cert) -> CertSummary {
 /// `version`, `serial`, `subject`, `issuer`, `validity` (`not_before` /
 /// `not_after`), `signature_algorithm` (`oid` / `name`), `public_key`
 /// (`algorithm` / `key_bits` / `curve`), `basic_constraints` (`null` when
-/// absent), `key_usage` (`null` when absent), and `subject_alt_name` (`null`
-/// when absent). Folded under the `summary` key by `main.rs`.
+/// absent), `key_usage` (`null` when absent), `subject_key_id` (`null` when
+/// absent), `authority_key_id` (`null` when absent), and `subject_alt_name`
+/// (`null` when absent). Folded under the `summary` key by `main.rs`.
 pub fn build_summary_json(cert: &Cert) -> Value {
     let s = build_summary(cert);
 
@@ -396,6 +430,8 @@ pub fn build_summary_json(cert: &Cert) -> Value {
         "public_key": public_key,
         "basic_constraints": basic_constraints,
         "key_usage": key_usage,
+        "subject_key_id": s.subject_key_id,
+        "authority_key_id": s.authority_key_id,
         "subject_alt_name": subject_alt_name,
     })
 }
@@ -425,7 +461,8 @@ fn key_usage_names(ku: &KeyUsageBits) -> Vec<String> {
 ///
 /// Field order is fixed: Version, Serial, Subject, Issuer, Validity
 /// (notBefore / notAfter), Signature Algorithm, Public Key, BasicConstraints,
-/// KeyUsage, SubjectAltName. Absent extensions and unreadable fields print a
+/// KeyUsage, SubjectKeyId, AuthorityKeyId, SubjectAltName. Absent extensions
+/// and unreadable fields print a
 /// clear marker; there are no timestamps beyond the certificate's own dates, so
 /// the block is snapshot-friendly.
 pub fn render_summary_text(cert: &Cert) -> String {
@@ -466,6 +503,12 @@ pub fn render_summary_text(cert: &Cert) -> String {
         .map_or_else(|| ABSENT.to_string(), KeyUsageDisplay::render);
     let _ = writeln!(out, "  Key Usage:           {ku}");
 
+    let ski = summary.subject_key_id.as_deref().unwrap_or(ABSENT);
+    let _ = writeln!(out, "  Subject Key Id:      {ski}");
+
+    let aki = summary.authority_key_id.as_deref().unwrap_or(ABSENT);
+    let _ = writeln!(out, "  Authority Key Id:    {aki}");
+
     let san = summary
         .subject_alt_name
         .as_ref()
@@ -503,6 +546,8 @@ mod tests {
                 "Public Key:",
                 "Basic Constraints:",
                 "Key Usage:",
+                "Subject Key Id:",
+                "Authority Key Id:",
                 "Subject Alt Name:",
             ];
             let mut last = 0;
@@ -528,6 +573,45 @@ mod tests {
         fn is_deterministic() {
             let cert = good_cert();
             assert_eq!(render_summary_text(&cert), render_summary_text(&cert));
+        }
+
+        #[test]
+        fn renders_subject_key_id_and_absent_authority_key_id() {
+            // good.pem carries a Subject Key Identifier but no Authority Key
+            // Identifier, so the summary shows colon-hex for the former and the
+            // absent marker for the latter.
+            let cert = good_cert();
+            let summary = build_summary(&cert);
+
+            let ski = summary.subject_key_id.expect("good.pem has an SKI");
+            assert!(
+                ski.chars().all(|c| c.is_ascii_hexdigit() || c == ':'),
+                "SKI must be colon-separated hex, got {ski}"
+            );
+            assert!(summary.authority_key_id.is_none(), "good.pem has no AKI");
+
+            let text = render_summary_text(&cert);
+            assert!(text.contains(&format!("Subject Key Id:      {ski}")));
+            assert!(text.contains(&format!("Authority Key Id:    {ABSENT}")));
+        }
+    }
+
+    mod hex_colon {
+        use super::*;
+
+        #[test]
+        fn renders_uppercase_colon_separated() {
+            assert_eq!(hex_colon(&[0x9F, 0x8D, 0xA1, 0x15]), "9F:8D:A1:15");
+        }
+
+        #[test]
+        fn single_byte_has_no_separator() {
+            assert_eq!(hex_colon(&[0x05]), "05");
+        }
+
+        #[test]
+        fn empty_is_empty() {
+            assert_eq!(hex_colon(&[]), "");
         }
     }
 

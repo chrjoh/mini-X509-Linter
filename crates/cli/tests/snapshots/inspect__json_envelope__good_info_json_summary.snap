@@ -1,9 +1,10 @@
 ---
 source: crates/cli/tests/inspect.rs
-assertion_line: 313
+assertion_line: 326
 expression: "value[\"summary\"]"
 ---
 {
+  "authority_key_id": null,
   "basic_constraints": {
     "ca": false,
     "critical": false,
@@ -34,6 +35,7 @@ expression: "value[\"summary\"]"
       }
     ]
   },
+  "subject_key_id": "1D:33:53:BC:F1:E7:31:96:F9:67:D2:FC:72:0A:F0:96:7D:2F:4C:13",
   "validity": {
     "not_after": "Jun  1 00:00:00 2027 +00:00",
     "not_before": "Jun  1 00:00:00 2026 +00:00"

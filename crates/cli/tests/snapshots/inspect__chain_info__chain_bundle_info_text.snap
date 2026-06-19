@@ -1,5 +1,6 @@
 ---
 source: crates/cli/tests/inspect.rs
+assertion_line: 430
 expression: out
 ---
 Certificate 1 (leaf)
@@ -14,6 +15,8 @@ Certificate Summary
   Public Key:          rsaEncryption (1.2.840.113549.1.1.1), 2048 bits
   Basic Constraints:   CA:false (not critical)
   Key Usage:           (not present)
+  Subject Key Id:      2E:77:A6:45:4F:44:B8:80:60:A1:24:E6:62:9E:E5:82:D8:E6:BF:17
+  Authority Key Id:    (not present)
   Subject Alt Name:    DNS:chain-leaf.example.com (not critical)
 
 Certificate 2
@@ -28,6 +31,8 @@ Certificate Summary
   Public Key:          rsaEncryption (1.2.840.113549.1.1.1), 2048 bits
   Basic Constraints:   CA:true (critical)
   Key Usage:           Certificate Sign, CRL Sign (critical)
+  Subject Key Id:      7A:D0:6E:50:00:3B:D3:AE:C0:17:53:66:8C:EB:0D:EE:14:BF:65:70
+  Authority Key Id:    (not present)
   Subject Alt Name:    (not present)
 
 Certificate 1 (leaf)
