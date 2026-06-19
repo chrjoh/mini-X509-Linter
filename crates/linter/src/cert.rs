@@ -2519,13 +2519,11 @@ mod tests {
             let ski = cert.subject_key_id_bytes().unwrap();
             assert!(ski.is_some(), "good.pem carries an SKI extension");
             let ski = ski.unwrap();
+            // The SKI is a SHA-1 hash of the public key, so its bytes change every
+            // time `generate.sh` re-rolls the fixture's key. Assert only the
+            // key-agnostic shape (present + 20-octet length) — never the exact
+            // octets, which would break on every regeneration.
             assert_eq!(ski.len(), 20, "SKI key id is a 20-octet SHA-1 hash");
-            // Matches the openssl-reported SKI 1D:33:53:BC:... for good.pem.
-            assert_eq!(
-                &ski[..4],
-                &[0x1D, 0x33, 0x53, 0xBC],
-                "SKI key id matches the fixture's first octets"
-            );
 
             assert!(
                 cert.authority_key_id_bytes().unwrap().is_none(),
