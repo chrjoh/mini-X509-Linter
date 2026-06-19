@@ -615,3 +615,10 @@ cargo audit                                  # dependency advisories
 Test fixtures under `testdata/` are generated reproducibly with `openssl` (see
 `testdata/generate.sh`). The linter is intentionally kept as an **independent oracle**, so
 fixtures are never sourced from other certificate-generating tooling.
+
+## Acknowledgements
+
+The lint catalogue is inspired by [zlint](https://github.com/zmap/zlint) (Apache-2.0). All checks
+are **reimplemented from scratch** against the underlying specifications (RFC 5280 and the
+CA/Browser Forum Baseline Requirements, EV, Code Signing, and S/MIME profiles) — **no zlint code is
+used**; only the idea of *which* rules are worth checking, and a naming sensibility, are borrowed.

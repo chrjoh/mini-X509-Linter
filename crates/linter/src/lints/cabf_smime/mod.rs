@@ -3,9 +3,10 @@
 //! Each submodule holds one [`Lint`](crate::Lint) impl enforcing a single,
 //! structurally-checkable requirement from the CA/Browser Forum S/MIME Baseline
 //! Requirements, tagged [`RuleSource::CabfSmime`](crate::RuleSource). A curated,
-//! high-signal subset (12 lints) of zlint's ~36-lint S/MIME menu: only the rules
-//! that are decidable from the encoded certificate via the [`Cert`] facade are
-//! ported. The validation-tier (Mailbox / Organization / Sponsor / Individual)
+//! high-signal subset (12 lints) modeled on zlint's ~36-lint S/MIME menu: we
+//! reimplement, from the S/MIME BR spec, only the rules that are decidable from
+//! the encoded certificate via the [`Cert`] facade. The validation-tier
+//! (Mailbox / Organization / Sponsor / Individual)
 //! and legacy/multipurpose/strict *generation* distinctions turn on out-of-band
 //! CA validation state the certificate does not encode, and are out of scope.
 //!

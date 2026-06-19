@@ -6,7 +6,8 @@
 //! identity-assurance profile layered on top of the Baseline Requirements
 //! (EV ⊂ BR ⊂ RFC 5280): an EV cert carries verified legal-entity identity in
 //! the subject DN and asserts a recognized EV policy OID. A curated,
-//! high-signal subset (9 lints) of zlint's EV menu is ported here.
+//! high-signal subset (9 lints) modeled on zlint's EV menu, reimplemented here
+//! from the EV Guidelines.
 //!
 //! # Scoping policy (EV-policy-OID self-gated — LOAD-BEARING)
 //!
