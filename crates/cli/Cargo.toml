@@ -16,7 +16,10 @@ fetch = ["dep:fetch"]
 
 [dependencies]
 # `serde` feature enables Serialize on the contract types for JSON output.
-linter = { path = "../linter", features = ["serde"] }
+# `verify` enables the chain crypto pass (`chain_signature_valid`) so the binary
+# verifies signatures out of the box; library users opt in separately. The
+# `fetch` feature stays opt-in (see `[features]` above).
+linter = { path = "../linter", features = ["serde", "verify"] }
 # Pinned 2026-06-15 to latest stable releases (see feature 01 plan.md).
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

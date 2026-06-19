@@ -10,8 +10,9 @@
 //!
 //! - `--format <text|json>` — output format (default `text`).
 //! - `--source <list>` — comma-separated subset of
-//!   `rfc5280,pqc,cabf_br,cabf_ev,cabf_cs,cabf_smime,hygiene` (default: all
-//!   sources).
+//!   `rfc5280,pqc,cabf_br,cabf_ev,cabf_cs,cabf_smime,hygiene,chain` (default: all
+//!   sources). `chain` is the cross-certificate (chain-aware) source; it only
+//!   takes effect under `--chain` (or `--from-host`) with ≥2 presented certs.
 //! - `--min-severity <notice|warn|error|fatal>` — hide findings below the given
 //!   level (default `notice`).
 //! - `--fail-on <notice|warn|error|fatal>` — exit non-zero if any surfaced
@@ -198,9 +199,11 @@ struct Args {
     format: Format,
 
     /// Comma-separated lint sources to run: `rfc5280`, `pqc`, `cabf_br`,
-    /// `cabf_ev`, `cabf_cs`, `cabf_smime`, `hygiene`.
+    /// `cabf_ev`, `cabf_cs`, `cabf_smime`, `hygiene`, `chain`.
     ///
-    /// Defaults to all sources when omitted.
+    /// `chain` is the cross-certificate (chain-aware) source: it runs only under
+    /// `--chain` (or `--from-host`) with ≥2 presented certs, and is suppressed if
+    /// `--source` is given without `chain`. Defaults to all sources when omitted.
     #[arg(long)]
     source: Option<String>,
 
@@ -236,7 +239,7 @@ struct Args {
 
 /// The full set of sources, used when `--source` is omitted. Order matches the
 /// text formatter's `SOURCE_ORDER` for deterministic output.
-const ALL_SOURCES: [RuleSource; 7] = [
+const ALL_SOURCES: [RuleSource; 8] = [
     RuleSource::Rfc5280,
     RuleSource::Pqc,
     RuleSource::CabfBr,
@@ -244,6 +247,7 @@ const ALL_SOURCES: [RuleSource; 7] = [
     RuleSource::CabfCs,
     RuleSource::CabfSmime,
     RuleSource::Hygiene,
+    RuleSource::Chain,
 ];
 
 /// Process exit code returned when a surfaced finding reaches `--fail-on`.
@@ -259,8 +263,9 @@ fn parse_source_token(token: &str) -> Result<RuleSource> {
         "cabf_cs" => Ok(RuleSource::CabfCs),
         "cabf_smime" => Ok(RuleSource::CabfSmime),
         "hygiene" => Ok(RuleSource::Hygiene),
+        "chain" => Ok(RuleSource::Chain),
         other => bail!(
-            "unknown --source value '{other}' (expected rfc5280, pqc, cabf_br, cabf_ev, cabf_cs, cabf_smime, or hygiene)"
+            "unknown --source value '{other}' (expected rfc5280, pqc, cabf_br, cabf_ev, cabf_cs, cabf_smime, hygiene, or chain)"
         ),
     }
 }
@@ -486,6 +491,65 @@ fn chain_label(idx: usize) -> String {
     }
 }
 
+/// Builds the labelled chain-link views from the engine's per-link reports,
+/// deriving each cert's label from its original-input index via [`chain_label`].
+///
+/// The labels follow the BUILT chain order (the order the engine returns the
+/// reports in), so a reordered bundle is labelled by its reconstructed position.
+///
+/// A **chain-level** report (a broken set that built to fewer than two linked
+/// positions; [`linter::ChainLinkReport::is_chain_level`]) carries no real
+/// `(subject, issuer)` link, so it gets empty labels — the renderer keys off
+/// `is_chain_level()` and never uses them (and `chain_label` is NOT called on the
+/// sentinel index, which would overflow).
+fn chain_link_views(reports: &[linter::ChainLinkReport]) -> Vec<output::ChainLinkView<'_>> {
+    reports
+        .iter()
+        .map(|report| {
+            if report.is_chain_level() {
+                output::ChainLinkView {
+                    subject_label: String::new(),
+                    issuer_label: String::new(),
+                    report,
+                }
+            } else {
+                output::ChainLinkView {
+                    subject_label: chain_label(report.subject_index),
+                    issuer_label: chain_label(report.issuer_index),
+                    report,
+                }
+            }
+        })
+        .collect()
+}
+
+/// Folds every chain finding (across all links and outcomes) into the surfaced
+/// severity counts, so chain findings drive the `--fail-on` exit code exactly
+/// like per-cert findings. Findings below `min` are not counted (mirroring the
+/// per-cert reporting boundary).
+fn chain_severity_counts(
+    reports: &[linter::ChainLinkReport],
+    min: Severity,
+) -> output::SeverityCounts {
+    let mut counts = output::SeverityCounts::default();
+    for report in reports {
+        for outcome in &report.outcomes {
+            for finding in &outcome.findings {
+                if finding.severity < min {
+                    continue;
+                }
+                match finding.severity {
+                    Severity::Fatal => counts.fatal += 1,
+                    Severity::Error => counts.error += 1,
+                    Severity::Warn => counts.warn += 1,
+                    Severity::Notice => counts.notice += 1,
+                }
+            }
+        }
+    }
+    counts
+}
+
 /// Lints and renders every certificate in the input as a chain.
 ///
 /// When `info` is set, a labelled [`inspect::render_summary_text`] block is
@@ -494,6 +558,17 @@ fn chain_label(idx: usize) -> String {
 /// — and the JSON envelope folds each cert's `summary` next to its `outcomes`
 /// (see [`render_chain_info_json`]). `--info` is additive: it does not suppress
 /// linting and does not change the exit code.
+///
+/// # Chain pass
+///
+/// When there are ≥2 certs AND `chain` is among `selected`, the cross-cert chain
+/// pass ([`linter::default_chain_registry`]) runs over the built chain and a
+/// dedicated `Chain checks:` section (text) / sibling `chain` array (JSON) is
+/// appended after the per-cert report. The chain source is purpose-independent,
+/// so it is selected directly (NOT routed through `effective_sources`, which
+/// gates the per-cert pass). Chain findings feed the `--fail-on` exit code like
+/// any finding. When the pass does not run (single cert, or `chain` deselected)
+/// the output is byte-for-byte unchanged.
 #[allow(clippy::too_many_arguments)]
 fn run_chain(
     certs: &[Cert],
@@ -518,6 +593,20 @@ fn run_chain(
         })
         .collect();
 
+    // The chain (cross-cert) pass is purpose-independent: it runs when there are
+    // ≥2 certs and the `chain` source is selected. It is NOT routed through
+    // `effective_sources` (which gates the per-cert pass over a single cert).
+    let run_chain_pass = certs.len() >= 2 && selected.contains(&RuleSource::Chain);
+    let link_reports: Vec<linter::ChainLinkReport> = if run_chain_pass {
+        linter::default_chain_registry().run(certs)
+    } else {
+        Vec::new()
+    };
+    // The pass can still yield no links (e.g. a chain that built to <2 effective
+    // positions); treat that as "no chain section".
+    let has_chain_section = run_chain_pass && !link_reports.is_empty();
+    let link_views = chain_link_views(&link_reports);
+
     match format {
         Format::Text => {
             let reports: Vec<CertReport<'_>> = per_cert
@@ -537,11 +626,45 @@ fn run_chain(
                 }
                 report = format!("{section}{report}");
             }
+            // Append the chain-level section after the per-cert report (blank-line
+            // separated). Omitted entirely when the chain pass did not run, so
+            // non-chain output is byte-for-byte unchanged.
+            if has_chain_section {
+                report.push('\n');
+                report.push_str(&output::render_chain_section(&link_views, min));
+            }
             print!("{report}");
         }
         Format::Json => {
             if info {
-                let json = render_chain_info_json(certs, &per_cert, min)?;
+                if has_chain_section {
+                    // Feature-14 envelope `{ "certificates": [...] }` gains a
+                    // sibling `chain` key (intentional reconciliation); the
+                    // per-cert `summary`/`outcomes` shape is unchanged.
+                    let mut document: serde_json::Value =
+                        serde_json::from_str(&render_chain_info_json(certs, &per_cert, min)?)
+                            .context("failed to re-parse --chain --info JSON")?;
+                    document["chain"] = output::chain_links_json(&link_views, min)?;
+                    let json = serde_json::to_string_pretty(&document)
+                        .context("failed to serialize --info chain report to JSON")?;
+                    println!("{json}");
+                } else {
+                    let json = render_chain_info_json(certs, &per_cert, min)?;
+                    println!("{json}");
+                }
+            } else if has_chain_section {
+                // Plain `--chain` JSON moves from a bare array to the envelope
+                // `{ "certificates": [...], "chain": [...] }` only when the chain
+                // pass runs. `certificates` is the existing per-cert array verbatim.
+                let certificates: serde_json::Value =
+                    serde_json::from_str(&render_chain_json(&per_cert, min)?)
+                        .context("failed to re-parse --chain certificates JSON")?;
+                let document = serde_json::json!({
+                    "certificates": certificates,
+                    "chain": output::chain_links_json(&link_views, min)?,
+                });
+                let json = serde_json::to_string_pretty(&document)
+                    .context("failed to serialize --chain report to JSON")?;
                 println!("{json}");
             } else {
                 let json = render_chain_json(&per_cert, min)?;
@@ -550,11 +673,18 @@ fn run_chain(
         }
     }
 
-    // Exit code: fail if any cert has a surfaced finding at/above `fail_on`.
+    // Exit code: fail if any cert OR any chain finding is surfaced at/above
+    // `fail_on`.
     let mut worst_triggers = false;
     for (_, outcomes) in &per_cert {
         let counts = output::severity_counts(outcomes, min);
         if exit_code(counts, fail_on) != ExitCode::SUCCESS {
+            worst_triggers = true;
+        }
+    }
+    if has_chain_section {
+        let chain_counts = chain_severity_counts(&link_reports, min);
+        if exit_code(chain_counts, fail_on) != ExitCode::SUCCESS {
             worst_triggers = true;
         }
     }
@@ -651,7 +781,19 @@ fn exit_code(counts: output::SeverityCounts, fail_on: Severity) -> ExitCode {
 /// The `--from-host` pipeline: validate the target, fetch the chain, optionally
 /// save it, lint the leaf, and render the chain + verdict + findings.
 ///
-/// Only the leaf is linted; the presented intermediates are display context.
+/// Only the leaf is linted per-cert; the presented intermediates are display
+/// context. Additively, when the presented chain has ≥2 parseable certs and the
+/// `chain` source is selected, the cross-cert chain pass runs over the presented
+/// chain (leaf + intermediates) and a `Chain checks:` section (text) / sibling
+/// `chain` key (JSON) is appended AFTER the `verification:` verdict. The leaf
+/// report, `presented_chain` display, and verdict bytes above it are unchanged.
+///
+/// Trust vs. lint: the `verification:` verdict establishes trust to a root (via
+/// webpki-roots in the `fetch` crate); the chain lints verify only the soundness
+/// of the LINKS that are present. A merely-absent root at the top is therefore a
+/// `chain_issuer_not_in_chain` Notice, never an Error. Intermediates that fail to
+/// parse are dropped from the chain `Vec<Cert>` (they still appear in the display
+/// `presented_chain`).
 ///
 /// # Errors
 ///
@@ -733,6 +875,30 @@ fn run_from_host(
     // Build the presented-chain display entries (leaf + intermediates).
     let entries = build_chain_entries(&leaf, &chain.intermediates_der);
 
+    // Build the chain `Vec<Cert>` for the cross-cert pass: the leaf plus each
+    // intermediate that parses. Intermediates that fail to parse are dropped from
+    // the chain vec (they still appear in the display above) — degrade, never
+    // panic. The chain pass is purpose-independent (selected at the source level,
+    // NOT via `effective_sources`).
+    let mut presented: Vec<Cert> = Vec::with_capacity(1 + chain.intermediates_der.len());
+    presented.push(
+        Cert::from_der(&chain.leaf_der)
+            .context("failed to parse the leaf certificate presented by the host")?,
+    );
+    for der in &chain.intermediates_der {
+        if let Ok(cert) = Cert::from_der(der) {
+            presented.push(cert);
+        }
+    }
+    let run_chain_pass = presented.len() >= 2 && selected.contains(&RuleSource::Chain);
+    let link_reports: Vec<linter::ChainLinkReport> = if run_chain_pass {
+        linter::default_chain_registry().run(&presented)
+    } else {
+        Vec::new()
+    };
+    let has_chain_section = run_chain_pass && !link_reports.is_empty();
+    let link_views = chain_link_views(&link_reports);
+
     match args.format {
         Format::Text => {
             let mut report = String::new();
@@ -749,6 +915,11 @@ fn run_from_host(
                 verbosity,
                 Some(&header),
             ));
+            // Chain-level section AFTER the leaf report + verdict; purely additive.
+            if has_chain_section {
+                report.push('\n');
+                report.push_str(&output::render_chain_section(&link_views, min));
+            }
             print!("{report}");
         }
         Format::Json => {
@@ -756,7 +927,7 @@ fn run_from_host(
             let outcomes_value: serde_json::Value = serde_json::from_str(&outcomes_json)
                 .context("failed to re-parse leaf outcomes JSON")?;
             let section = output::chain_section_json(&entries, &chain.verdict);
-            let document = if args.info {
+            let mut document = if args.info {
                 serde_json::json!({
                     "summary": inspect::build_summary_json(&leaf),
                     "presented_chain": section["presented_chain"],
@@ -770,14 +941,30 @@ fn run_from_host(
                     "outcomes": outcomes_value,
                 })
             };
+            // Additive sibling `chain` key; existing keys are untouched.
+            if has_chain_section {
+                document["chain"] = output::chain_links_json(&link_views, min)?;
+            }
             let json = serde_json::to_string_pretty(&document)
                 .context("failed to serialize --from-host report to JSON")?;
             println!("{json}");
         }
     }
 
-    let counts = output::severity_counts(&outcomes, min);
-    Ok(exit_code(counts, fail_on))
+    // Exit code: fold the leaf findings and any chain findings into `--fail-on`.
+    let mut triggers =
+        exit_code(output::severity_counts(&outcomes, min), fail_on) != ExitCode::SUCCESS;
+    if has_chain_section {
+        let chain_counts = chain_severity_counts(&link_reports, min);
+        if exit_code(chain_counts, fail_on) != ExitCode::SUCCESS {
+            triggers = true;
+        }
+    }
+    Ok(if triggers {
+        ExitCode::from(EXIT_FINDINGS)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// Builds the presented-chain display entries: the leaf plus each intermediate,

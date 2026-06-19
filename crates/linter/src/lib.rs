@@ -18,16 +18,33 @@
 //! The engine only calls [`Lint::check`] when [`Lint::applies`] returned
 //! [`Applicability::Applies`]. An empty `Vec<Finding>` from `check` means the
 //! certificate **passed** that lint — there is deliberately no `Pass` severity.
+//!
+//! # The chain pass (additive, separate)
+//!
+//! Alongside the per-cert [`Lint`] path there is a wholly separate **chain
+//! pass** ([`mod@chain`]) that reasons ACROSS the certificates of a presented
+//! chain. It first runs an order-independent **construction** step
+//! ([`build_chain`]) that links each cert to its issuer by byte-exact Name-DER
+//! matching (confirmed by AKI/SKI when both are present) and emits a normalized
+//! leaf→…→top order plus construction diagnostics; then it runs pairwise
+//! [`ChainLint`]s over the BUILT adjacent links. The per-cert [`Lint`],
+//! [`Registry`], and [`default_registry`] path is byte-for-byte UNCHANGED — the
+//! chain pass is purely additive.
 
 #![deny(missing_docs)]
 
 pub mod cert;
+pub mod chain;
 mod finding;
 pub mod lints;
 pub mod registry;
 mod source;
 
 pub use cert::Cert;
+pub use chain::{
+    ChainLink, ChainLinkOutcome, ChainLinkReport, ChainLint, ChainRegistry, ConstructionDiagnostic,
+    OrderedChain, build_chain, default_chain_registry,
+};
 pub use finding::{Applicability, Finding, LintOutcome, Severity};
 pub use registry::{CertPurpose, Registry, default_registry};
 pub use source::RuleSource;

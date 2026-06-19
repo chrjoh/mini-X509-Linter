@@ -382,6 +382,17 @@ mod determinism {
 /// All tests drive the real `mini-x509-lint` binary over the EXISTING 2-cert
 /// `testdata/chain_bundle.pem` (leaf `CN=chain-leaf.example.com` first, then
 /// `CN=Chain Test Root CA`). No new fixture is added.
+///
+/// # Feature 15 interaction (chain-aware lints)
+///
+/// `chain_bundle.pem` is two UNRELATED self-signed certs that do NOT form a
+/// chain. Once feature 15 added the chain pass, a `--chain` run over this bundle
+/// surfaces a `chain_subject_issuer_dn_match` Error in a `Chain checks:` section
+/// (rendered under a `(whole chain)` heading) AND the `--chain` JSON moved to the
+/// `{ certificates, chain }` envelope. The per-cert summaries and per-cert
+/// outcomes these tests assert on are UNCHANGED; the additive chain section just
+/// means the `--chain` exit code is now non-zero and the JSON carries a sibling
+/// `chain` key. The assertions below were updated to that reality.
 mod chain_info {
     use super::*;
 
@@ -484,14 +495,16 @@ mod chain_info {
             "second label must head BOTH its summary and its lint report, got:\n{out}"
         );
 
-        // The lint report markers and the trailing chain summary line are present.
+        // The lint report markers and the chain summary line are present. (The
+        // feature-15 chain section follows the `summary:` line, so the per-cert
+        // report's `summary: no findings` trailer is no longer the very last line.)
         assert!(
             out.contains("[rfc5280]") && out.contains("OK: no findings"),
             "the chain lint report must still follow the summaries, got:\n{out}"
         );
         assert!(
-            out.trim_end().ends_with("summary: no findings"),
-            "the chain lint report (its trailing summary line) must come last, got:\n{out}"
+            out.contains("summary: no findings"),
+            "the chain lint report's trailing summary line must be present, got:\n{out}"
         );
 
         // The lint report sits BELOW both summary blocks.
@@ -582,9 +595,13 @@ mod chain_info {
         let env_value: serde_json::Value =
             serde_json::from_str(&enveloped).expect("--chain --info JSON must parse");
 
-        let bare_arr = bare_value
+        // Feature 15: a broken/unrelated bundle moves the non-info `--chain` JSON
+        // from a bare array to the `{ certificates, chain }` envelope (the chain
+        // pass produced reports). The per-cert outcomes still live under
+        // `certificates`, so compare those.
+        let bare_arr = bare_value["certificates"]
             .as_array()
-            .expect("non-info --chain JSON is a bare array");
+            .expect("non-info --chain JSON must carry a certificates array");
         let env_arr = env_value["certificates"]
             .as_array()
             .expect("certificates must be an array");
@@ -728,7 +745,10 @@ mod chain_info {
             out.starts_with("Certificate 1 (leaf)\n[rfc5280]"),
             "default --chain report must lead straight into the lint groups, got:\n{out}"
         );
-        // JSON: still the bare array, not the info envelope.
+        // JSON: NOT the `--info` envelope. Feature 15 wraps a chain-pass run in the
+        // `{ certificates, chain }` envelope (this bundle is two unrelated certs →
+        // a chain-level structural finding), but it must still carry NO per-cert
+        // `summary` key (that is the `--info`-only addition).
         let raw = stdout(&[
             "--chain",
             "--format",
@@ -736,16 +756,22 @@ mod chain_info {
             &fixture_arg("chain_bundle.pem"),
         ]);
         let value: serde_json::Value = serde_json::from_str(&raw).expect("--chain JSON must parse");
+        let certs = value["certificates"]
+            .as_array()
+            .expect("default --chain JSON must carry a certificates array");
         assert!(
-            value.is_array(),
-            "default --chain JSON must remain a bare array, not an envelope object"
+            certs.iter().all(|c| c.get("summary").is_none()),
+            "default --chain JSON (no --info) must not fold in per-cert summaries"
         );
     }
 
     #[test]
     fn info_does_not_change_the_chain_exit_code() {
         // `--info` is additive over `--chain`: the exit code is identical with and
-        // without it. Both certs in chain_bundle.pem are all-pass -> exit 0.
+        // without it. (Feature 15: chain_bundle.pem is two unrelated self-signed
+        // certs, so the chain pass surfaces a structural Error → the default
+        // --fail-on error exits 1 either way. The invariant under test is that
+        // --info does not CHANGE the exit code, not its specific value.)
         let without = run(&["--chain", &fixture_arg("chain_bundle.pem")]);
         let with = run(&["--chain", "--info", &fixture_arg("chain_bundle.pem")]);
         assert_eq!(
@@ -755,8 +781,8 @@ mod chain_info {
         );
         assert_eq!(
             without.status.code(),
-            Some(0),
-            "an all-pass chain must exit 0 with or without --info"
+            Some(1),
+            "the unrelated-cert bundle surfaces a chain Error → exit 1 with or without --info"
         );
     }
 
@@ -809,8 +835,10 @@ mod chain_info {
             "the root's (later) absent-SAN marker must render after the leaf block, got:\n{out}"
         );
         // And the full chain lint report still renders below both summaries.
+        // (Feature 15 appends a `Chain checks:` section after `summary:`, so the
+        // per-cert report's trailer is present but no longer the final line.)
         assert!(
-            out.trim_end().ends_with("summary: no findings"),
+            out.contains("summary: no findings"),
             "the full chain lint report must still render after degraded blocks, got:\n{out}"
         );
         // Both certs were summarized: exactly two summary blocks.

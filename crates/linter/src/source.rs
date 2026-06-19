@@ -10,7 +10,7 @@ use serde::Serialize;
 ///
 /// When serialized (with the `serde` feature), variants are rendered in
 /// `snake_case` to match the CLI `--source` vocabulary: `rfc5280`, `pqc`,
-/// `cabf_br`, `cabf_ev`, `cabf_cs`, `cabf_smime`, `hygiene`.
+/// `cabf_br`, `cabf_ev`, `cabf_cs`, `cabf_smime`, `hygiene`, `chain`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -37,4 +37,12 @@ pub enum RuleSource {
     /// General certificate hygiene that is not mandated by a specific standard
     /// but is widely considered good practice.
     Hygiene,
+    /// Cross-certificate **chain** checks (the lint-id prefix `chain_*`). This is
+    /// the only source whose lints reason across MORE than one certificate: they
+    /// inspect adjacent `(subject, issuer)` links of a built leaf→…→top chain
+    /// rather than a single certificate in isolation. Unlike the per-cert sources
+    /// it is **not** folded into the per-purpose allowed-source sets — chain lints
+    /// run in a separate pass and only surface when a real chain is presented
+    /// (`--chain` with ≥2 certs, or the `--from-host` presented chain).
+    Chain,
 }

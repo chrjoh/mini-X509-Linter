@@ -122,23 +122,40 @@ mod min_severity_interaction {
 mod chain {
     use super::*;
 
+    // Positive control: `chain_valid.pem` is a genuinely linked
+    // leaf -> intermediate -> root chain that bundles its own self-signed root, so
+    // both the per-cert pass and the chain pass surface nothing. (The earlier
+    // `chain_bundle.pem` control was retired here: it is two UNRELATED self-signed
+    // certs that do NOT form a chain, so under the feature-15 chain lints it
+    // correctly surfaces a structural-integrity Error — covered by the
+    // unrelated-bundle test below.)
     #[test]
-    fn chain_bundle_all_pass_exits_zero() {
-        // Both certs in the bundle are clean -> no surfaced findings.
-        let code = exit_code(&["--chain", &fixture_arg("chain_bundle.pem")]);
+    fn clean_chain_all_pass_exits_zero() {
+        // Every per-cert and chain lint passes -> no surfaced findings.
+        let code = exit_code(&["--chain", &fixture_arg("chain_valid.pem")]);
         assert_eq!(code, Some(0));
     }
 
     #[test]
     fn chain_exit_reflects_only_surfaced_findings() {
-        // With --fail-on warn and an all-pass bundle, still 0 (no warns either).
+        // With --fail-on warn and an all-pass linked chain, still 0 (no warns,
+        // no construction Notices: it is in leaf-to-root order and bundles its root).
         let code = exit_code(&[
             "--chain",
-            &fixture_arg("chain_bundle.pem"),
+            &fixture_arg("chain_valid.pem"),
             "--fail-on",
             "warn",
         ]);
         assert_eq!(code, Some(0));
+    }
+
+    #[test]
+    fn unrelated_bundle_surfaces_structural_error_exits_one() {
+        // `chain_bundle.pem` is two unrelated self-signed certs that do not link.
+        // Under the chain lints this is a broken set: `chain_subject_issuer_dn_match`
+        // fires Error, so the default --fail-on error trips a non-zero exit.
+        let code = exit_code(&["--chain", &fixture_arg("chain_bundle.pem")]);
+        assert_eq!(code, Some(1));
     }
 }
 

@@ -775,6 +775,398 @@ mod pqc_output {
     }
 }
 
+mod chain_output {
+    //! End-to-end `--chain` chain-section tests (feature 15). The CLI builds the
+    //! linter with `verify` on by default, so `chain_signature_valid` participates
+    //! in these runs.
+    //!
+    //! ⚠️ The chain fixtures use BR_OK-aligned windows (`2026-06-01 ->
+    //! 2027-06-01`); they expire ~2027-06-01. The chain-section assertions here are
+    //! clock-independent, but the per-cert pass over the same fixtures is not —
+    //! regenerate `testdata/` annually.
+    //!
+    //! A missing-middle / DN-mismatch broken bundle that collapses to fewer than
+    //! two linked positions surfaces its `chain_subject_issuer_dn_match` Error on a
+    //! chain-level report: the text renders the `Chain checks:` section under a
+    //! `(whole chain)` heading, the JSON emits a `{ "scope": "chain", … }` entry,
+    //! and `--fail-on error` exits non-zero. See
+    //! `crates/linter/tests/chain.rs::broken_chain_reporting`.
+    use super::*;
+
+    /// `--chain` on the clean chain renders the per-cert report unchanged followed
+    /// by a `Chain checks:` section with each built link passing.
+    #[test]
+    fn chain_clean_renders_chain_section_after_per_cert_report() {
+        // Setup + Invoke
+        let output = run(&["--chain", fixture("chain_valid.pem").to_str().unwrap()]);
+
+        // Find
+        let stdout = stdout_of(&output);
+
+        // Expect: clean exit, the per-cert blocks (Certificate 1..3), then the
+        // chain section with two passing links.
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            stdout.contains("Certificate 1 (leaf)"),
+            "per-cert report must still render:\n{stdout}"
+        );
+        let chain_pos = stdout
+            .find("Chain checks:")
+            .unwrap_or_else(|| panic!("missing Chain checks section:\n{stdout}"));
+        let per_cert_pos = stdout.find("Certificate 1 (leaf)").unwrap();
+        assert!(
+            per_cert_pos < chain_pos,
+            "the chain section must come AFTER the per-cert report:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("Certificate 1 (leaf) → Certificate 2"),
+            "first built link label missing:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("Certificate 2 → Certificate 3"),
+            "second built link label missing:\n{stdout}"
+        );
+        // Every link passes on the clean chain.
+        let chain_section = &stdout[chain_pos..];
+        assert!(
+            chain_section.contains("(no findings)"),
+            "clean chain links must show the no-findings placeholder:\n{stdout}"
+        );
+        assert!(
+            !chain_section.contains("error ["),
+            "clean chain must surface no chain error:\n{stdout}"
+        );
+    }
+
+    /// `--chain` on the bad-signature chain surfaces the `chain_signature_valid`
+    /// Error on the leaf→inter link, and `--fail-on error` returns the findings
+    /// exit code.
+    #[test]
+    fn chain_bad_signature_error_and_fail_on_exit_code() {
+        // Setup + Invoke (no --fail-on: default exit is success even with findings)
+        let report = run(&[
+            "--chain",
+            fixture("chain_bad_signature.pem").to_str().unwrap(),
+        ]);
+        let stdout = stdout_of(&report);
+
+        // Expect: the chain section shows the signature Error on the leaf link.
+        let chain_section = &stdout[stdout
+            .find("Chain checks:")
+            .unwrap_or_else(|| panic!("missing Chain checks section:\n{stdout}"))..];
+        assert!(
+            chain_section.contains("Certificate 1 (leaf) → Certificate 2"),
+            "the broken link must be labelled:\n{stdout}"
+        );
+        assert!(
+            chain_section.contains("error [chain_signature_valid]"),
+            "the patched signature must surface a chain_signature_valid error:\n{stdout}"
+        );
+
+        // Invoke with --fail-on error: the chain Error must drive a non-zero exit.
+        let gated = run(&[
+            "--chain",
+            fixture("chain_bad_signature.pem").to_str().unwrap(),
+            "--fail-on",
+            "error",
+        ]);
+        assert!(
+            !gated.status.success(),
+            "a chain Error with --fail-on error must exit non-zero:\n{}",
+            stdout_of(&gated)
+        );
+    }
+
+    /// `--chain` on the shuffled-but-complete bundle shows the `chain_not_in_order`
+    /// Notice and all links passing; `--min-severity warn` hides the Notice.
+    #[test]
+    fn chain_shuffled_shows_notice_hidden_by_min_severity_warn() {
+        // Setup + Invoke
+        let output = run(&["--chain", fixture("chain_shuffled.pem").to_str().unwrap()]);
+        let stdout = stdout_of(&output);
+
+        // Expect: success, the Notice present, and no error/warn from disorder.
+        assert!(
+            output.status.success(),
+            "shuffled-but-complete chain must exit 0, stderr: {:?}",
+            output.stderr
+        );
+        let chain_section = &stdout[stdout.find("Chain checks:").unwrap()..];
+        assert!(
+            chain_section.contains("notice [chain_not_in_order]"),
+            "the shuffled chain must surface the reorder Notice:\n{stdout}"
+        );
+        assert!(
+            !chain_section.contains("error [") && !chain_section.contains("warn ["),
+            "disorder alone must not raise Error/Warn:\n{stdout}"
+        );
+
+        // With --min-severity warn the Notice is filtered out.
+        let filtered = run(&[
+            "--chain",
+            fixture("chain_shuffled.pem").to_str().unwrap(),
+            "--min-severity",
+            "warn",
+        ]);
+        let filtered_stdout = stdout_of(&filtered);
+        assert!(
+            !filtered_stdout.contains("chain_not_in_order"),
+            "--min-severity warn must hide the chain_not_in_order Notice:\n{filtered_stdout}"
+        );
+    }
+
+    /// `--chain` on a DN-mismatch (unlinkable) bundle surfaces the
+    /// `chain_subject_issuer_dn_match` Error on a chain-level report: the text
+    /// renders the `Chain checks:` section under the `(whole chain)` heading, the
+    /// JSON emits a `{ "scope": "chain", … }` entry, and `--fail-on error` exits
+    /// non-zero.
+    #[test]
+    fn chain_dn_mismatch_surfaces_error_and_fails() {
+        // Setup + Invoke
+        let output = run(&[
+            "--chain",
+            fixture("chain_dn_mismatch.pem").to_str().unwrap(),
+        ]);
+        let stdout = stdout_of(&output);
+
+        // Expect: the chain section renders the structural-integrity Error under
+        // the chain-level `(whole chain)` heading (no link arrow).
+        let chain_section = &stdout[stdout
+            .find("Chain checks:")
+            .unwrap_or_else(|| panic!("missing Chain checks section:\n{stdout}"))..];
+        assert!(
+            chain_section.contains("(whole chain)"),
+            "a collapsed broken set must render under the (whole chain) heading:\n{stdout}"
+        );
+        assert!(
+            chain_section.contains("error [chain_subject_issuer_dn_match]"),
+            "the broken chain must surface a chain_subject_issuer_dn_match error:\n{stdout}"
+        );
+
+        // The JSON document carries a chain-level entry discriminated by `scope`.
+        let json = run(&[
+            "--chain",
+            "--format",
+            "json",
+            fixture("chain_dn_mismatch.pem").to_str().unwrap(),
+        ]);
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout_of(&json)).expect("chain JSON must be valid JSON");
+        let chain = value["chain"]
+            .as_array()
+            .expect("broken-chain JSON must carry a `chain` array");
+        let level = chain
+            .iter()
+            .find(|e| e["scope"] == serde_json::json!("chain"))
+            .expect("a chain-level entry must carry scope=chain");
+        let has_error = level["outcomes"]
+            .as_array()
+            .expect("chain-level entry must carry outcomes")
+            .iter()
+            .filter(|o| o["lint_id"] == serde_json::json!("chain_subject_issuer_dn_match"))
+            .flat_map(|o| o["findings"].as_array().cloned().unwrap_or_default())
+            .any(|f| f["severity"] == serde_json::json!("error"));
+        assert!(
+            has_error,
+            "the chain-level JSON entry must carry a chain_subject_issuer_dn_match error:\n{}",
+            stdout_of(&json)
+        );
+
+        // --fail-on error: the chain Error must drive a non-zero exit.
+        let gated = run(&[
+            "--chain",
+            fixture("chain_dn_mismatch.pem").to_str().unwrap(),
+            "--fail-on",
+            "error",
+        ]);
+        assert!(
+            !gated.status.success(),
+            "a broken chain with --fail-on error must exit non-zero:\n{}",
+            stdout_of(&gated)
+        );
+    }
+
+    /// `--chain` on the missing-middle bundle (leaf + root, no intermediate)
+    /// likewise surfaces the chain-level Error and exits non-zero under
+    /// `--fail-on error`.
+    #[test]
+    fn chain_missing_middle_surfaces_error_and_fails() {
+        // Setup + Invoke
+        let output = run(&[
+            "--chain",
+            fixture("chain_missing_middle.pem").to_str().unwrap(),
+        ]);
+        let stdout = stdout_of(&output);
+
+        // Expect: the chain section renders the Error under the chain-level
+        // `(whole chain)` heading.
+        let chain_section = &stdout[stdout
+            .find("Chain checks:")
+            .unwrap_or_else(|| panic!("missing Chain checks section:\n{stdout}"))..];
+        assert!(
+            chain_section.contains("(whole chain)"),
+            "a collapsed broken set must render under the (whole chain) heading:\n{stdout}"
+        );
+        assert!(
+            chain_section.contains("error [chain_subject_issuer_dn_match]"),
+            "the missing-middle chain must surface a chain_subject_issuer_dn_match error:\n{stdout}"
+        );
+
+        // --fail-on error: the chain Error must drive a non-zero exit.
+        let gated = run(&[
+            "--chain",
+            fixture("chain_missing_middle.pem").to_str().unwrap(),
+            "--fail-on",
+            "error",
+        ]);
+        assert!(
+            !gated.status.success(),
+            "a missing-middle chain with --fail-on error must exit non-zero:\n{}",
+            stdout_of(&gated)
+        );
+    }
+
+    /// `--source chain` runs the chain pass; the per-cert lints are all filtered
+    /// out (so each per-cert block reports no findings) and the chain section is
+    /// present.
+    #[test]
+    fn source_chain_runs_only_the_chain_pass() {
+        // Setup + Invoke
+        let output = run(&[
+            "--source",
+            "chain",
+            fixture("chain_valid.pem").to_str().unwrap(),
+            "--chain",
+        ]);
+        let stdout = stdout_of(&output);
+
+        // Expect: success, the chain section present, and no per-cert source groups
+        // (all per-cert sources were deselected).
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            stdout.contains("Chain checks:"),
+            "--source chain must run the chain pass:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("[rfc5280]") && !stdout.contains("[cabf_br]"),
+            "--source chain must deselect every per-cert source group:\n{stdout}"
+        );
+    }
+
+    /// `--source rfc5280` under `--chain` deselects the chain pass: NO chain
+    /// section, and the per-cert rfc5280 group is the only group rendered.
+    #[test]
+    fn source_rfc5280_under_chain_suppresses_chain_section() {
+        // Setup + Invoke
+        let output = run(&[
+            "--source",
+            "rfc5280",
+            fixture("chain_valid.pem").to_str().unwrap(),
+            "--chain",
+        ]);
+        let stdout = stdout_of(&output);
+
+        // Expect: success, no chain section, and the rfc5280 per-cert group present.
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+        assert!(
+            !stdout.contains("Chain checks:"),
+            "a --source without `chain` must suppress the chain pass:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("[rfc5280]"),
+            "the selected per-cert source must still render:\n{stdout}"
+        );
+    }
+
+    /// A single-cert file input (no `--chain`) renders NO chain section.
+    #[test]
+    fn single_cert_input_has_no_chain_section() {
+        let output = run(&[fixture("good.pem").to_str().unwrap()]);
+        let stdout = stdout_of(&output);
+        assert!(
+            !stdout.contains("Chain checks:"),
+            "a single-cert run must never render a chain section:\n{stdout}"
+        );
+    }
+
+    /// JSON `--chain` on the clean chain emits the `{ certificates, chain }`
+    /// envelope; `chain` carries one entry per link with `subject`, `issuer`, and
+    /// `outcomes` (`{ lint_id, source: "chain", findings }`).
+    #[test]
+    fn json_chain_envelope_has_certificates_and_chain() {
+        // Setup + Invoke
+        let output = run(&[
+            "--chain",
+            "--format",
+            "json",
+            fixture("chain_valid.pem").to_str().unwrap(),
+        ]);
+        assert!(
+            output.status.success(),
+            "expected exit 0, stderr: {:?}",
+            output.stderr
+        );
+
+        // Find: parse the document.
+        let stdout = stdout_of(&output);
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("chain JSON must be valid JSON");
+
+        // Expect: an object with `certificates` and `chain` arrays.
+        let obj = value.as_object().expect("--chain JSON must be an object");
+        assert!(
+            obj.contains_key("certificates"),
+            "envelope must carry `certificates`:\n{stdout}"
+        );
+        let chain = obj
+            .get("chain")
+            .and_then(|c| c.as_array())
+            .expect("envelope must carry a `chain` array");
+        assert_eq!(chain.len(), 2, "a 3-cert chain has two links");
+        let first = &chain[0];
+        assert!(first.get("subject").is_some(), "link must carry `subject`");
+        assert!(first.get("issuer").is_some(), "link must carry `issuer`");
+        let outcomes = first["outcomes"]
+            .as_array()
+            .expect("link must carry an `outcomes` array");
+        for o in outcomes {
+            assert_eq!(
+                o["source"],
+                serde_json::json!("chain"),
+                "every chain outcome must carry the chain source token"
+            );
+            assert!(o.get("lint_id").is_some(), "outcome must carry lint_id");
+            assert!(o.get("findings").is_some(), "outcome must carry findings");
+        }
+    }
+
+    /// JSON single-cert input is unchanged: a bare top-level array, no `chain`
+    /// key.
+    #[test]
+    fn json_single_cert_has_no_chain_key() {
+        let output = run(&["--format", "json", fixture("good.pem").to_str().unwrap()]);
+        let stdout = stdout_of(&output);
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("single-cert JSON must be valid JSON");
+        assert!(
+            value.is_array(),
+            "single-cert JSON must stay a bare top-level array:\n{stdout}"
+        );
+    }
+}
+
 mod error_behaviour {
     use super::*;
 

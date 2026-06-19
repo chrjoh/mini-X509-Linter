@@ -1177,3 +1177,279 @@ openssl req -x509 -new -key "$SLH_CA_KEY" \
 echo "wrote $HERE/slh_dsa_root_ca.pem (self-signed SLH-DSA-SHA2-128s root CA, openssl-native)"
 # The throwaway private key is not committed.
 rm -f "$SLH_CA_KEY"
+
+# ============================================================================
+# Feature 15 (chain-aware lints) — leaf -> intermediate -> root chain fixtures
+# ============================================================================
+# Self-contained section. Generates every `chain_*.pem` fixture the chain-aware
+# lint tests consume (crates/linter/tests/chain.rs, crates/cli/tests/output.rs).
+# Each fixture is a REAL linked chain (leaf actually issued by an intermediate
+# actually issued by a self-signed root) unless noted otherwise.
+#
+# PROVENANCE (HARD PROJECT RULE): openssl 3.6.2 ONLY, NEVER the user's external
+# cert-bar tool — the linter must stay an INDEPENDENT oracle. The PQC chain
+# (chain_pqc_valid.pem) needs openssl >= 3.6.2 (ML-DSA support); if the host
+# lacks it that one fixture cannot be regenerated (the others are classical).
+#
+# ⚠️ TIME-FRAGILITY: all chain fixtures use the BR_OK-aligned window
+#     2026-06-01 -> 2027-06-01
+# EXCEPT chain_validity_not_nested.pem, whose LEAF deliberately runs to
+# 2027-09-01 (past the issuer's notAfter) to trip chain_validity_nested. They
+# EXPIRE ~2027-06-01; after that hygiene_not_expired fires in the PER-CERT pass
+# over these fixtures. The chain LINTS themselves are clock-independent.
+#   >>> REGENERATE ANNUALLY (slide the windows forward) BEFORE 2027-06-01. <<<
+#
+# DETERMINISM: fixed serials (4xx) and fixed validity windows are pinned so the
+# committed bytes are reproducible. (RSA/EC keys are random, so the exact bytes
+# still differ per regen — but the linter assertions key off cert STRUCTURE, not
+# fixed bytes, and there is no committed chain golden that pins these bytes; the
+# only --chain golden is chain_bundle.pem, two UNRELATED self-signed certs that
+# produce 0 chain links and therefore no chain section.)
+#
+# PER-FIXTURE PRODUCIBILITY NOTES:
+#   - chain_valid / chain_classical_valid / chain_pqc_valid: openssl-native real
+#     chains; every chain lint passes (sig verifies via ring / fips204).
+#   - chain_shuffled: the SAME three chain_valid certs re-concatenated in
+#     non-leaf-first order (root, leaf, inter). No separate issuance → only
+#     chain_not_in_order (Notice) fires; build_chain reorders it.
+#   - chain_missing_middle: chain_valid's leaf + root only (intermediate omitted).
+#   - chain_dn_mismatch: leaf (issued by 'inter') bundled with a DIFFERENT-subject
+#     intermediate + root, so the leaf links to nothing.
+#   - chain_aki_ski_mismatch: a 2-cert bundle (leaf3 + the real 'inter'). leaf3 is
+#     issued by inter3, a SAME-SUBJECT-DN but DIFFERENT-KEY intermediate, so the
+#     leaf's AKI keyId != inter's SKI. NB: because build_chain's linkage rule ALSO
+#     requires AKI==SKI when both present, the leaf does NOT link to inter through
+#     the engine — so chain_aki_ski_match is exercised by DIRECT check(subject,
+#     issuer) invocation on the two loaded certs (see chain.rs).
+#   - chain_issuer_not_ca: leaf issued by a CA:FALSE cert ('notca'), + root.
+#   - chain_path_len_exceeded: root pathlen:0 -> intermediate CA -> leaf (an
+#     intermediate CA appears below a pathlen:0 CA).
+#   - chain_validity_not_nested: leaf notAfter (2027-09-01) beyond its issuer's.
+#   - chain_bad_signature: a real leaf issued by 'inter' whose signature value has
+#     its LAST DER byte XOR 0xFF, so it does not verify -> chain_signature_valid
+#     Error on that link (DER byte-patch, openssl cannot emit a bad self-signature
+#     natively).
+#   - chain_unsupported_sig_alg: a P-521 / ecdsa-with-SHA512 chain. ring's
+#     supported matrix excludes P-521, so the verifier returns Unsupported ->
+#     chain_signature_valid Notice (fail-open), never an Error.
+
+CHAIN_WORK="$(mktemp -d)"
+CW() { printf '%s/%s' "$CHAIN_WORK" "$1"; }
+CHAIN_NB=20260601000000Z
+CHAIN_NA=20270601000000Z
+
+# ---- Real RSA chain: root -> intermediate (pathlen:0) -> leaf -----------------
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW root.key)" >/dev/null 2>&1
+openssl req -x509 -new -key "$(CW root.key)" -sha256 \
+  -subj "/CN=mini-x509 chain test root/C=SE/O=mini-x509-linter testdata" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" -addext "authorityKeyIdentifier=keyid" \
+  -set_serial 401 -not_before $CHAIN_NB -not_after $CHAIN_NA \
+  -out "$(CW root.pem)" >/dev/null 2>&1
+
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW inter.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW inter.key)" \
+  -subj "/CN=mini-x509 chain test intermediate/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW inter.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW inter.ext)"
+openssl x509 -req -in "$(CW inter.csr)" -CA "$(CW root.pem)" -CAkey "$(CW root.key)" \
+  -set_serial 402 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW inter.ext)" \
+  -sha256 -out "$(CW inter.pem)" >/dev/null 2>&1
+
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW leaf.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW leaf.key)" \
+  -subj "/CN=chain-leaf.example.com/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW leaf.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:chain-leaf.example.com\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW leaf.ext)"
+openssl x509 -req -in "$(CW leaf.csr)" -CA "$(CW inter.pem)" -CAkey "$(CW inter.key)" \
+  -set_serial 403 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW leaf.ext)" \
+  -sha256 -out "$(CW leaf.pem)" >/dev/null 2>&1
+
+cat "$(CW leaf.pem)" "$(CW inter.pem)" "$(CW root.pem)" > "$HERE/chain_valid.pem"
+echo "wrote $HERE/chain_valid.pem (RSA leaf -> intermediate -> root, all chain lints pass)"
+
+# chain_shuffled: same three certs, non-leaf-first order (root, leaf, inter).
+cat "$(CW root.pem)" "$(CW leaf.pem)" "$(CW inter.pem)" > "$HERE/chain_shuffled.pem"
+echo "wrote $HERE/chain_shuffled.pem (reordered -> chain_not_in_order Notice only)"
+
+# chain_missing_middle: leaf + root only (intermediate absent).
+cat "$(CW leaf.pem)" "$(CW root.pem)" > "$HERE/chain_missing_middle.pem"
+echo "wrote $HERE/chain_missing_middle.pem (leaf + root, intermediate omitted)"
+
+# ---- chain_dn_mismatch: leaf bundled with a different-subject intermediate ----
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW inter2.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW inter2.key)" \
+  -subj "/CN=mini-x509 DIFFERENT intermediate/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW inter2.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW inter2.ext)"
+openssl x509 -req -in "$(CW inter2.csr)" -CA "$(CW root.pem)" -CAkey "$(CW root.key)" \
+  -set_serial 422 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW inter2.ext)" \
+  -sha256 -out "$(CW inter2.pem)" >/dev/null 2>&1
+cat "$(CW leaf.pem)" "$(CW inter2.pem)" "$(CW root.pem)" > "$HERE/chain_dn_mismatch.pem"
+echo "wrote $HERE/chain_dn_mismatch.pem (leaf's issuer DN matches no bundled cert)"
+
+# ---- chain_aki_ski_mismatch: same-DN, different-key intermediate -------------
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW inter3.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW inter3.key)" \
+  -subj "/CN=mini-x509 chain test intermediate/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW inter3.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW inter3.ext)"
+openssl x509 -req -in "$(CW inter3.csr)" -CA "$(CW root.pem)" -CAkey "$(CW root.key)" \
+  -set_serial 442 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW inter3.ext)" \
+  -sha256 -out "$(CW inter3.pem)" >/dev/null 2>&1
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW leaf3.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW leaf3.key)" \
+  -subj "/CN=aki-mismatch-leaf.example.com/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW leaf3.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:aki-mismatch-leaf.example.com\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW leaf3.ext)"
+openssl x509 -req -in "$(CW leaf3.csr)" -CA "$(CW inter3.pem)" -CAkey "$(CW inter3.key)" \
+  -set_serial 443 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW leaf3.ext)" \
+  -sha256 -out "$(CW leaf3.pem)" >/dev/null 2>&1
+# 2-cert bundle for DIRECT-invocation testing: leaf3 (AKI=inter3 SKI) + real inter.
+cat "$(CW leaf3.pem)" "$(CW inter.pem)" > "$HERE/chain_aki_ski_mismatch.pem"
+echo "wrote $HERE/chain_aki_ski_mismatch.pem (leaf AKI keyId != issuer SKI; direct-invocation)"
+
+# ---- chain_issuer_not_ca: leaf issued by a CA:FALSE cert ---------------------
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW notca.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW notca.key)" \
+  -subj "/CN=mini-x509 not-a-ca issuer/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW notca.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW notca.ext)"
+openssl x509 -req -in "$(CW notca.csr)" -CA "$(CW root.pem)" -CAkey "$(CW root.key)" \
+  -set_serial 432 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW notca.ext)" \
+  -sha256 -out "$(CW notca.pem)" >/dev/null 2>&1
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW leaf2.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW leaf2.key)" \
+  -subj "/CN=leaf-under-nonca.example.com/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW leaf2.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:leaf-under-nonca.example.com\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW leaf2.ext)"
+openssl x509 -req -in "$(CW leaf2.csr)" -CA "$(CW notca.pem)" -CAkey "$(CW notca.key)" \
+  -set_serial 433 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW leaf2.ext)" \
+  -sha256 -out "$(CW leaf2.pem)" >/dev/null 2>&1
+cat "$(CW leaf2.pem)" "$(CW notca.pem)" "$(CW root.pem)" > "$HERE/chain_issuer_not_ca.pem"
+echo "wrote $HERE/chain_issuer_not_ca.pem (issuer is CA:FALSE)"
+
+# ---- chain_path_len_exceeded: pathlen:0 root -> intermediate CA -> leaf ------
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW plroot.key)" >/dev/null 2>&1
+openssl req -x509 -new -key "$(CW plroot.key)" -sha256 \
+  -subj "/CN=mini-x509 pathlen0 root/C=SE/O=mini-x509-linter testdata" \
+  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" -addext "authorityKeyIdentifier=keyid" \
+  -set_serial 451 -not_before $CHAIN_NB -not_after $CHAIN_NA \
+  -out "$(CW plroot.pem)" >/dev/null 2>&1
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW plinter.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW plinter.key)" \
+  -subj "/CN=mini-x509 pathlen test intermediate/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW plinter.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW plinter.ext)"
+openssl x509 -req -in "$(CW plinter.csr)" -CA "$(CW plroot.pem)" -CAkey "$(CW plroot.key)" \
+  -set_serial 452 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW plinter.ext)" \
+  -sha256 -out "$(CW plinter.pem)" >/dev/null 2>&1
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW plleaf.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW plleaf.key)" \
+  -subj "/CN=pathlen-leaf.example.com/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW plleaf.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:pathlen-leaf.example.com\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW plleaf.ext)"
+openssl x509 -req -in "$(CW plleaf.csr)" -CA "$(CW plinter.pem)" -CAkey "$(CW plinter.key)" \
+  -set_serial 453 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW plleaf.ext)" \
+  -sha256 -out "$(CW plleaf.pem)" >/dev/null 2>&1
+cat "$(CW plleaf.pem)" "$(CW plinter.pem)" "$(CW plroot.pem)" > "$HERE/chain_path_len_exceeded.pem"
+echo "wrote $HERE/chain_path_len_exceeded.pem (pathlen:0 CA with an intermediate below)"
+
+# ---- chain_validity_not_nested: leaf notAfter beyond issuer notAfter ---------
+LEAF_LATE_NA=20270901000000Z
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW vnleaf.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW vnleaf.key)" \
+  -subj "/CN=validity-not-nested-leaf.example.com/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW vnleaf.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:validity-not-nested-leaf.example.com\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW vnleaf.ext)"
+openssl x509 -req -in "$(CW vnleaf.csr)" -CA "$(CW inter.pem)" -CAkey "$(CW inter.key)" \
+  -set_serial 463 -not_before $CHAIN_NB -not_after $LEAF_LATE_NA -extfile "$(CW vnleaf.ext)" \
+  -sha256 -out "$(CW vnleaf.pem)" >/dev/null 2>&1
+cat "$(CW vnleaf.pem)" "$(CW inter.pem)" "$(CW root.pem)" > "$HERE/chain_validity_not_nested.pem"
+echo "wrote $HERE/chain_validity_not_nested.pem (leaf outlives issuer; notAfter $LEAF_LATE_NA)"
+
+# ---- chain_classical_valid: ECDSA P-256 chain (positive control via ring) ----
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$(CW ecroot.key)" >/dev/null 2>&1
+openssl req -x509 -new -key "$(CW ecroot.key)" -sha256 \
+  -subj "/CN=mini-x509 ecdsa chain root/C=SE" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" -addext "authorityKeyIdentifier=keyid" \
+  -set_serial 411 -not_before $CHAIN_NB -not_after $CHAIN_NA -out "$(CW ecroot.pem)" >/dev/null 2>&1
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$(CW ecinter.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW ecinter.key)" -subj "/CN=mini-x509 ecdsa chain intermediate/C=SE" -out "$(CW ecinter.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW ecinter.ext)"
+openssl x509 -req -in "$(CW ecinter.csr)" -CA "$(CW ecroot.pem)" -CAkey "$(CW ecroot.key)" \
+  -set_serial 412 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW ecinter.ext)" -sha256 -out "$(CW ecinter.pem)" >/dev/null 2>&1
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$(CW ecleaf.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW ecleaf.key)" -subj "/CN=ecdsa-leaf.example.com/C=SE" -out "$(CW ecleaf.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:ecdsa-leaf.example.com\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW ecleaf.ext)"
+openssl x509 -req -in "$(CW ecleaf.csr)" -CA "$(CW ecinter.pem)" -CAkey "$(CW ecinter.key)" \
+  -set_serial 413 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW ecleaf.ext)" -sha256 -out "$(CW ecleaf.pem)" >/dev/null 2>&1
+cat "$(CW ecleaf.pem)" "$(CW ecinter.pem)" "$(CW ecroot.pem)" > "$HERE/chain_classical_valid.pem"
+echo "wrote $HERE/chain_classical_valid.pem (ECDSA P-256 chain; verifies via ring)"
+
+# ---- chain_pqc_valid: ML-DSA-65 chain (requires openssl >= 3.6.2) ------------
+openssl genpkey -algorithm ML-DSA-65 -out "$(CW pqroot.key)" >/dev/null 2>&1
+openssl req -x509 -new -key "$(CW pqroot.key)" \
+  -subj "/CN=mini-x509 ML-DSA chain root/C=SE/O=mini-x509-linter testdata" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" -addext "authorityKeyIdentifier=keyid" \
+  -set_serial 481 -not_before $CHAIN_NB -not_after $CHAIN_NA -out "$(CW pqroot.pem)" >/dev/null 2>&1
+openssl genpkey -algorithm ML-DSA-65 -out "$(CW pqinter.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW pqinter.key)" -subj "/CN=mini-x509 ML-DSA chain intermediate/C=SE/O=mini-x509-linter testdata" -out "$(CW pqinter.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW pqinter.ext)"
+openssl x509 -req -in "$(CW pqinter.csr)" -CA "$(CW pqroot.pem)" -CAkey "$(CW pqroot.key)" \
+  -set_serial 482 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW pqinter.ext)" -out "$(CW pqinter.pem)" >/dev/null 2>&1
+openssl genpkey -algorithm ML-DSA-65 -out "$(CW pqleaf.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW pqleaf.key)" -subj "/CN=mldsa-leaf.example.com/C=SE/O=mini-x509-linter testdata" -out "$(CW pqleaf.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:mldsa-leaf.example.com\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW pqleaf.ext)"
+openssl x509 -req -in "$(CW pqleaf.csr)" -CA "$(CW pqinter.pem)" -CAkey "$(CW pqinter.key)" \
+  -set_serial 483 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW pqleaf.ext)" -out "$(CW pqleaf.pem)" >/dev/null 2>&1
+cat "$(CW pqleaf.pem)" "$(CW pqinter.pem)" "$(CW pqroot.pem)" > "$HERE/chain_pqc_valid.pem"
+echo "wrote $HERE/chain_pqc_valid.pem (ML-DSA-65 chain; verifies via fips204; needs openssl >= 3.6.2)"
+
+# ---- chain_bad_signature: DER-patch the last byte of a real leaf signature ---
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$(CW bsleaf.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW bsleaf.key)" \
+  -subj "/CN=bad-signature-leaf.example.com/C=SE/O=mini-x509-linter testdata" \
+  -out "$(CW bsleaf.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:bad-signature-leaf.example.com\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW bsleaf.ext)"
+openssl x509 -req -in "$(CW bsleaf.csr)" -CA "$(CW inter.pem)" -CAkey "$(CW inter.key)" \
+  -set_serial 473 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW bsleaf.ext)" \
+  -sha256 -out "$(CW bsleaf.pem)" >/dev/null 2>&1
+openssl x509 -in "$(CW bsleaf.pem)" -outform DER -out "$(CW bsleaf.der)" >/dev/null 2>&1
+python3 - "$(CW bsleaf.der)" "$(CW bsleaf_patched.der)" <<'PY'
+import sys
+data = bytearray(open(sys.argv[1], 'rb').read())
+data[-1] ^= 0xFF   # corrupt the last signature byte so verification fails
+open(sys.argv[2], 'wb').write(data)
+PY
+openssl x509 -inform DER -in "$(CW bsleaf_patched.der)" -outform PEM -out "$(CW bsleaf_patched.pem)" >/dev/null 2>&1
+cat "$(CW bsleaf_patched.pem)" "$(CW inter.pem)" "$(CW root.pem)" > "$HERE/chain_bad_signature.pem"
+echo "wrote $HERE/chain_bad_signature.pem (leaf signature last byte XOR 0xFF -> chain_signature_valid Error)"
+
+# ---- chain_unsupported_sig_alg: P-521 / ecdsa-with-SHA512 chain --------------
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-521 -out "$(CW p5root.key)" >/dev/null 2>&1
+openssl req -x509 -new -key "$(CW p5root.key)" -sha512 \
+  -subj "/CN=mini-x509 P-521 chain root/C=SE/O=mini-x509-linter testdata" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" -addext "authorityKeyIdentifier=keyid" \
+  -set_serial 491 -not_before $CHAIN_NB -not_after $CHAIN_NA -out "$(CW p5root.pem)" >/dev/null 2>&1
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-521 -out "$(CW p5inter.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW p5inter.key)" -subj "/CN=mini-x509 P-521 chain intermediate/C=SE/O=mini-x509-linter testdata" -out "$(CW p5inter.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW p5inter.ext)"
+openssl x509 -req -in "$(CW p5inter.csr)" -CA "$(CW p5root.pem)" -CAkey "$(CW p5root.key)" \
+  -set_serial 492 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW p5inter.ext)" -sha512 -out "$(CW p5inter.pem)" >/dev/null 2>&1
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-521 -out "$(CW p5leaf.key)" >/dev/null 2>&1
+openssl req -new -key "$(CW p5leaf.key)" -subj "/CN=p521-leaf.example.com/C=SE/O=mini-x509-linter testdata" -out "$(CW p5leaf.csr)" >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:p521-leaf.example.com\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' > "$(CW p5leaf.ext)"
+openssl x509 -req -in "$(CW p5leaf.csr)" -CA "$(CW p5inter.pem)" -CAkey "$(CW p5inter.key)" \
+  -set_serial 493 -not_before $CHAIN_NB -not_after $CHAIN_NA -extfile "$(CW p5leaf.ext)" -sha512 -out "$(CW p5leaf.pem)" >/dev/null 2>&1
+cat "$(CW p5leaf.pem)" "$(CW p5inter.pem)" "$(CW p5root.pem)" > "$HERE/chain_unsupported_sig_alg.pem"
+echo "wrote $HERE/chain_unsupported_sig_alg.pem (P-521 / ecdsa-with-SHA512 -> chain_signature_valid Notice, fail-open)"
+
+# Throwaway keys/CSRs/configs are not committed.
+rm -rf "$CHAIN_WORK"

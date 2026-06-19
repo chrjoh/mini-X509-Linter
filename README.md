@@ -2,11 +2,14 @@
 
 mini-X509-Linter is a from-scratch X.509 certificate linter written in Rust and inspired by
 [zlint](https://github.com/zmap/zlint). It parses a certificate, runs a registry of **66**
-focused lints, and reports what it finds as human-readable text or machine-readable JSON. The
-lints are drawn from seven rule sources: **RFC 5280** structural conformance, a set of
+per-certificate lints, and reports what it finds as human-readable text or machine-readable JSON.
+The per-cert lints are drawn from seven rule sources: **RFC 5280** structural conformance, a set of
 **post-quantum (PQC)** algorithm checks, the four **CA/Browser Forum** profiles (**Baseline
 Requirements**, **Extended Validation**, **Code Signing**, and **S/MIME**), and a set of
-pragmatic **hygiene** checks.
+pragmatic **hygiene** checks. On top of those, an eighth **`chain`** source runs **chain-aware**
+checks across a certificate chain (issuer↔subject linkage, AKI↔SKI matching, pathLen, validity
+nesting, and — with the `verify` feature — cryptographic signature verification of each cert against
+its issuer, classical and post-quantum).
 
 Beyond plain file linting, the tool can fetch a certificate straight from a live host over TLS,
 print a detailed inspection summary of a certificate's own fields (including post-quantum
@@ -46,6 +49,13 @@ Build with the feature only when you want live retrieval:
 cargo build -p cli --features fetch
 ```
 
+Cryptographic chain **signature verification** (`chain_signature_valid`) lives behind a `verify`
+cargo feature on the `linter` crate. The **CLI enables it by default**, so `mini-x509-lint --chain`
+verifies signatures out of the box — its pure-Rust crypto deps (`ring` for RSA/ECDSA/Ed25519,
+`fips204`/`fips205` for ML-DSA/SLH-DSA; no OpenSSL/C toolchain) come in only via the CLI. The
+`linter` **library** keeps `verify` opt-in so library consumers stay dependency-light; the other
+seven chain lints are structural and need no crypto, so they run without the feature.
+
 The binary is named **`mini-x509-lint`** and lands at `target/debug/mini-x509-lint` (or
 `target/release/mini-x509-lint` for a release build).
 
@@ -75,7 +85,7 @@ The input is **either** a positional `<PATH>` (a PEM or DER certificate file) **
 | Flag | Values | Default | Description |
 |------|--------|---------|-------------|
 | `--format` | `text`, `json` | `text` | Output format. `text` is grouped by rule source; `json` is one object per lint outcome. |
-| `--source` | comma-separated subset of `rfc5280`, `pqc`, `cabf_br`, `cabf_ev`, `cabf_cs`, `cabf_smime`, `hygiene` | all | Restrict which rule sources run. |
+| `--source` | comma-separated subset of `rfc5280`, `pqc`, `cabf_br`, `cabf_ev`, `cabf_cs`, `cabf_smime`, `hygiene`, `chain` | all | Restrict which rule sources run. (`chain` only produces output under `--chain` / `--from-host`.) |
 | `--min-severity` | `notice`, `warn`, `error`, `fatal` | `notice` | Drop findings below this level at the reporting boundary (not shown, no effect on the exit code). |
 | `--fail-on` | `notice`, `warn`, `error`, `fatal` | `error` | Exit non-zero if any *surfaced* finding is at or above this level. |
 | `--chain` | (flag) | off | Lint **every** certificate in a PEM bundle, not just the first. |
@@ -125,9 +135,10 @@ mini-x509-lint --fail-on warn --min-severity warn certs/leaf.pem
 
 ## Rule sources & lints
 
-The 66 lints are grouped into seven sources. Each lint declares its source, so `--source`
-selects them by group and the text report groups findings the same way. The counts and a
-representative sample of each group:
+The **66 per-certificate lints** are grouped into seven sources, plus an eighth **`chain`** source
+of **8 chain-aware lints** (see [Linting a chain](#linting-a-chain--bundle---chain)). Each lint
+declares its source, so `--source` selects them by group and the text report groups findings the same
+way. The counts and a representative sample of each group:
 
 - **`rfc5280`** (16) — structural conformance to RFC 5280: e.g. `rfc5280_version_is_v3`,
   `rfc5280_serial_number_positive`, `rfc5280_validity_not_after_after_not_before`,
@@ -154,6 +165,10 @@ representative sample of each group:
 - **`hygiene`** (4) — pragmatic, profile-independent best-practice checks:
   `hygiene_not_expired`, `hygiene_no_sha1_signature`, `hygiene_rsa_key_min_2048`,
   `hygiene_ecdsa_curve_allowlist`.
+- **`chain`** (8) — cross-certificate checks run over a chain (only under `--chain` / `--from-host`,
+  see below): `chain_subject_issuer_dn_match`, `chain_not_in_order`, `chain_issuer_not_in_chain`,
+  `chain_aki_ski_match`, `chain_issuer_is_ca`, `chain_path_len_respected`, `chain_validity_nested`,
+  and `chain_signature_valid` (the last only with the `verify` feature — on by default in the CLI).
 
 Most lints self-gate via an *applicability* check: a lint that does not apply to a given
 certificate (a CA-only rule on a leaf, a code-signing rule on a TLS cert, a PQC rule on an RSA
@@ -398,8 +413,55 @@ Certificate 2
 summary: 1 warn
 ```
 
-Each certificate is linted **independently** — there are no chain-aware lints (see
-[Scope & limitations](#scope--limitations)).
+### Chain-aware checks (the `chain` source)
+
+Beyond linting each certificate independently, `--chain` also runs the **`chain`** source over the
+bundle as a whole and appends a `Chain checks:` section. It first **builds the chain by issuer↔subject
+linkage** (byte-exact Name DER, confirmed by AKI↔SKI) — so the order of the certs in the file does
+**not** matter; a shuffled bundle is reordered and reported with a `chain_not_in_order` **Notice**
+rather than spurious errors. It then checks each link: issuer/subject linkage, AKI↔SKI match,
+issuer-is-a-CA, `pathLenConstraint`, validity nesting, and — with the `verify` feature (on by default
+in the CLI) — **cryptographic signature verification** of each certificate against its issuer's key
+(RSA/ECDSA/Ed25519 via `ring`; ML-DSA/SLH-DSA via `fips204`/`fips205`; an unsupported algorithm yields
+a `Notice`, never a false error). Chain findings fold into the exit code like any other.
+
+```sh
+$ mini-x509-lint --chain valid-chain.pem
+Certificate 1 (leaf)
+... per-cert reports ...
+Certificate 3
+OK: no findings
+summary: no findings
+
+Chain checks:
+Certificate 1 (leaf) → Certificate 2
+  (no findings)
+Certificate 2 → Certificate 3
+  (no findings)
+```
+
+A **broken** chain — a missing intermediate, an unrelated cert, a wrong issuer, or a bad signature —
+is reported (and fails the run). When the bundle doesn't form a single chain, the construction
+findings appear under a `(whole chain)` heading:
+
+```sh
+$ mini-x509-lint --chain missing-intermediate.pem ; echo "exit=$?"
+...
+Chain checks:
+(whole chain)
+  error [chain_subject_issuer_dn_match] certificate 1 (CN=leaf.example.com) links to no issuer in the presented set (missing middle link / broken chain)
+  error [chain_subject_issuer_dn_match] certificate 2 (CN=Root CA) does not link into the presented chain (unlinkable / extra certificate)
+exit=1
+```
+
+In JSON the chain results appear in a top-level `chain` array (one entry per link, or a
+`{ "scope": "chain", … }` entry for whole-chain construction findings) alongside the existing
+per-cert structure.
+
+> **Trust vs. linting.** The chain source verifies the **soundness of the links that are present** —
+> it does **not** do trust-anchor / path validation against a root store, and it does not check
+> revocation. (For `--from-host`, anchoring to a trusted root is reported separately by the
+> `verification:` verdict.) See [Scope & limitations](#scope--limitations).
 
 Combining `--chain` with `--info` prints a summary block for **every** certificate in the
 bundle, each under the same `Certificate N` label, before the chain lint report:
@@ -443,12 +505,18 @@ derived from the host by default and `--sni <name>` overrides it; for an **IP** 
 cannot be derived, so `--sni` is **required** and the run errors clearly if it is missing.
 `--timeout <secs>` (default `10`) bounds the connection and handshake.
 
-Only the **leaf** certificate is linted — it flows into the same engine and produces the same
-findings as a file input. The intermediates the server presents are displayed as chain context
-(not linted), and alongside the findings the output shows a separate chain **verification
-verdict** (`verification: valid` or `verification: invalid: <reason>`). The verdict and the
-findings are distinct: the verdict is the result of validating the presented chain against a
-trusted root store, whereas the findings are the leaf's lint results.
+Only the **leaf** certificate is linted by the per-cert sources — it flows into the same engine and
+produces the same findings as a file input. The intermediates the server presents are displayed as
+chain context, and alongside the findings the output shows a separate chain **verification verdict**
+(`verification: valid` or `verification: invalid: <reason>`). The verdict and the findings are
+distinct: the verdict is the result of validating the presented chain against a trusted root store,
+whereas the findings are the leaf's lint results.
+
+The [chain-aware checks](#chain-aware-checks-the-chain-source) also run over the presented chain (leaf
++ intermediates), appending the same `Chain checks:` section. Because servers usually send the leaf and
+intermediates but **not** the root (the client holds it in its trust store), the top link gets a
+`chain_issuer_not_in_chain` **Notice** rather than an error — trust *to* the root is what the
+`verification:` verdict covers, separately.
 
 ```sh
 $ cargo run -p cli --features fetch -- --from-host example.com
@@ -515,11 +583,16 @@ $ cargo run -p cli --features fetch -- --from-host example.com --save chain.pem 
 
 This is a deliberately small linter; be aware of the boundaries:
 
-- **Each certificate is linted independently.** `--chain` parses and lints every certificate in a
-  bundle separately — there are **no chain-aware lints**: no path-building, no issuer/subject
-  linkage checks, and no signature verification against the issuer. Full chain validation is out
-  of scope (the `--from-host` verification verdict is the one exception, and it comes from
-  `rustls`/`webpki`, not from a lint).
+- **Chain-aware lints are scoped to the `chain` source.** Each certificate is still linted
+  independently by the per-cert sources, but with `--chain` (or over a `--from-host` presented
+  chain) the `chain` source additionally runs cross-cert checks: issuer↔subject linkage, AKI↔SKI
+  matching, issuer-is-CA, pathLen, validity nesting, and — with the `verify` feature (on by default
+  in the CLI) — **signature verification** of each cert against its issuer's key (RSA/ECDSA/Ed25519
+  via `ring`; ML-DSA/SLH-DSA via `fips204`/`fips205`). The chain is built order-independently, so a
+  shuffled bundle is reordered (a `chain_not_in_order` Notice) rather than mis-reported. What's still
+  out of scope: full **trust-anchor / path validation** against a root store (the `--from-host`
+  `verification:` verdict is the only trust check, and it comes from `rustls`/`webpki`, not a lint),
+  name-constraints propagation, and revocation.
 - **The CA/Browser Forum lints are a focused subset.** The BR, EV, code-signing, and S/MIME
   sources implement a curated subset of each specification, not the full text.
 - **PQC coverage is signature algorithms only.** The `pqc` source covers ML-DSA and SLH-DSA;

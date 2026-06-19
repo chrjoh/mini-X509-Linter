@@ -18,7 +18,14 @@
 //!   leaf); the cabf_cs and cabf_smime lints are out of profile here, so they are not run.
 //! - `cabf_br_validity_400_days.pem` — the only finding is the BR validity error
 //!   whose message embeds a fixed day-count (`400 days`), not a timestamp.
-//! - `chain_bundle.pem` — a freshly-generated all-pass leaf + CA, no findings.
+//! - `chain_bundle.pem` — two UNRELATED self-signed certs. Each cert passes its
+//!   own per-cert lints, but under the feature-15 chain lints the pair does NOT
+//!   link, so the chain pass surfaces a `chain_subject_issuer_dn_match` Error on a
+//!   chain-level (`(whole chain)`) report. The snapshot therefore shows the two
+//!   unchanged per-cert blocks PLUS the `Chain checks:` section with that error.
+//!   (Choice: `chain_bundle.pem` is kept as the golden fixture — it is a faithful
+//!   showcase of the broken-bundle chain section. A clean-chain golden is not
+//!   needed here; the clean-chain section is covered by `output.rs`.)
 //!
 //! ## Fixtures generated with openssl 3.6.2 (recipe summary)
 //!

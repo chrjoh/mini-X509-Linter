@@ -1779,6 +1779,161 @@ impl Cert {
     pub fn der_bytes(&self) -> &[u8] {
         &self.der
     }
+
+    /// The DER encoding of the subject `Name` (the raw `RDNSequence` bytes,
+    /// including the outer `SEQUENCE` tag and length), exactly as they appear in
+    /// the certificate.
+    ///
+    /// This is the byte-exact form RFC 5280 §4.1.2.6 name matching needs: chain
+    /// construction links a cert *A* to its issuer *B* when
+    /// `A.issuer_name_der() == B.subject_name_der()`. Because both accessors
+    /// surface the same parser-preserved DER of the same `Name` production, a
+    /// self-signed certificate satisfies `subject_name_der() == issuer_name_der()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_name_der(&self) -> Result<Vec<u8>, CertError> {
+        self.with_parsed(|c| c.subject().as_raw().to_vec())
+    }
+
+    /// The DER encoding of the issuer `Name` (the raw `RDNSequence` bytes,
+    /// including the outer `SEQUENCE` tag and length), exactly as they appear in
+    /// the certificate.
+    ///
+    /// The byte-exact counterpart of [`subject_name_der`](Cert::subject_name_der)
+    /// for RFC 5280 §4.1.2.4 issuer matching. Chain construction compares a
+    /// subject's `issuer_name_der()` against a candidate issuer's
+    /// `subject_name_der()`; both return the same encoding for the same logical
+    /// `Name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn issuer_name_der(&self) -> Result<Vec<u8>, CertError> {
+        self.with_parsed(|c| c.issuer().as_raw().to_vec())
+    }
+
+    /// The raw `keyIdentifier` octets of the Subject Key Identifier extension
+    /// (the OCTET STRING contents — the actual key id), or `None` when the SKI
+    /// extension is absent.
+    ///
+    /// This is the byte counterpart of
+    /// [`has_subject_key_identifier`](Cert::has_subject_key_identifier)
+    /// (RFC 5280 §4.2.1.2). Chain construction compares a subject's AKI
+    /// `keyIdentifier` (see [`authority_key_id_bytes`](Cert::authority_key_id_bytes))
+    /// against the issuer's SKI to disambiguate certificates that share a `Name`.
+    /// A malformed or duplicated extension is treated as absent (`None`) rather
+    /// than surfaced as an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn subject_key_id_bytes(&self) -> Result<Option<Vec<u8>>, CertError> {
+        // OID 2.5.29.14 = id-ce-subjectKeyIdentifier (RFC 5280 §4.2.1.2).
+        let oid = Oid::from(&[2, 5, 29, 14]).map_err(|_| CertError::Der)?;
+        self.with_parsed(|c| {
+            // A duplicated SKI is treated as absent (`None`) rather than an error.
+            c.get_extension_unique(&oid).ok().flatten().and_then(|ext| {
+                if let ParsedExtension::SubjectKeyIdentifier(ski) = ext.parsed_extension() {
+                    Some(ski.0.to_vec())
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    /// The raw `keyIdentifier` octets of the Authority Key Identifier extension
+    /// (the OCTET STRING contents), or `None` when the AKI extension is absent
+    /// OR when it carries no `keyIdentifier` field (e.g. an AKI holding only
+    /// `authorityCertIssuer` / `authorityCertSerialNumber`).
+    ///
+    /// This is the byte counterpart of the
+    /// [`AkiView::has_key_identifier`] boolean (RFC 5280 §4.2.1.1). Chain
+    /// construction compares this against the issuer's
+    /// [`subject_key_id_bytes`](Cert::subject_key_id_bytes). A malformed or
+    /// duplicated extension is treated as absent (`None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn authority_key_id_bytes(&self) -> Result<Option<Vec<u8>>, CertError> {
+        // OID 2.5.29.35 = id-ce-authorityKeyIdentifier (RFC 5280 §4.2.1.1).
+        let oid = Oid::from(&[2, 5, 29, 35]).map_err(|_| CertError::Der)?;
+        self.with_parsed(|c| {
+            // A duplicated AKI is treated as absent (`None`) rather than an error.
+            c.get_extension_unique(&oid).ok().flatten().and_then(|ext| {
+                if let ParsedExtension::AuthorityKeyIdentifier(aki) = ext.parsed_extension() {
+                    aki.key_identifier.as_ref().map(|kid| kid.0.to_vec())
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    /// The raw DER of the `tbsCertificate` (the exact bytes the certificate
+    /// signature is computed over, including the outer `SEQUENCE` tag and
+    /// length).
+    ///
+    /// These are the bytes a verifier hashes and checks against the issuer's
+    /// public key for `chain_signature_valid` (RFC 5280 §4.1.1.1 / §4.1.1.3).
+    /// Surfaced via `x509-parser`'s `TbsCertificate: AsRef<[u8]>`, which yields
+    /// the parser-preserved raw TBS slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn tbs_der(&self) -> Result<Vec<u8>, CertError> {
+        self.with_parsed(|c| c.tbs_certificate.as_ref().to_vec())
+    }
+
+    /// The certificate `signatureValue` BIT STRING content octets (the raw
+    /// signature bytes), excluding the BIT STRING's leading unused-bits octet.
+    ///
+    /// For a certificate signature the unused-bits count is always zero, so this
+    /// is exactly the signature a verifier checks against the issuer's public key
+    /// (RFC 5280 §4.1.1.3). Pairs with [`tbs_der`](Cert::tbs_der) and
+    /// [`signature_algorithm_oid`](Cert::signature_algorithm_oid) for
+    /// `chain_signature_valid`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn signature_value_bytes(&self) -> Result<Vec<u8>, CertError> {
+        self.with_parsed(|c| c.signature_value.data.to_vec())
+    }
+
+    /// The full `SubjectPublicKeyInfo` DER of **this** certificate.
+    ///
+    /// Returns the **complete SPKI DER** — the outer `SEQUENCE` wrapping the
+    /// `AlgorithmIdentifier` and the `subjectPublicKey` BIT STRING (RFC 5280
+    /// §4.1.2.7) — *not* the raw public-key bytes alone. The full SPKI is the
+    /// most generally useful form for the verify module (task 02): a caller can
+    /// extract both the algorithm and the key material from it, feeding `ring`
+    /// (which wants the per-algorithm key bytes, re-derived from the SPKI) or
+    /// `fips204` / `fips205` (which want the encoded public key) as each backend
+    /// requires.
+    ///
+    /// Named `issuer_spki_bytes` because chain verification calls it on the
+    /// *issuer* certificate (`issuer.issuer_spki_bytes()`) to obtain the key that
+    /// must verify the subject's signature; when called on any cert it returns
+    /// that same cert's own SPKI.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn issuer_spki_bytes(&self) -> Result<Vec<u8>, CertError> {
+        self.with_parsed(|c| c.public_key().raw.to_vec())
+    }
 }
 
 /// Looks up a human-readable short name for `oid` in x509-parser's bundled
@@ -2301,6 +2456,178 @@ mod tests {
             let curve = cert.ec_named_curve().unwrap();
 
             assert!(curve.is_none(), "RSA key has no named curve");
+        }
+    }
+
+    mod chain_raw_bytes_accessors {
+        use super::*;
+
+        fn load_one(name: &str) -> Cert {
+            let path = format!("{}/../../testdata/{name}", env!("CARGO_MANIFEST_DIR"));
+            let bytes = std::fs::read(&path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        #[test]
+        fn good_cert_name_der_is_non_empty_der_sequence() {
+            let cert = load_one("good.pem");
+
+            let subject = cert.subject_name_der().unwrap();
+            let issuer = cert.issuer_name_der().unwrap();
+
+            assert!(!subject.is_empty(), "subject Name DER is non-empty");
+            assert!(!issuer.is_empty(), "issuer Name DER is non-empty");
+            // The Name is a DER SEQUENCE (universal tag 0x30).
+            assert_eq!(subject[0], TAG_SEQUENCE, "subject Name is a SEQUENCE");
+            assert_eq!(issuer[0], TAG_SEQUENCE, "issuer Name is a SEQUENCE");
+        }
+
+        #[test]
+        fn self_signed_subject_name_der_equals_issuer_name_der() {
+            // good.pem is self-signed (Issuer == Subject == CN=good.example.com),
+            // so the two Name encodings are byte-for-byte identical.
+            let cert = load_one("good.pem");
+
+            let subject = cert.subject_name_der().unwrap();
+            let issuer = cert.issuer_name_der().unwrap();
+
+            assert_eq!(
+                subject, issuer,
+                "a self-signed cert's subject and issuer Name DER must match"
+            );
+        }
+
+        #[test]
+        fn self_signed_ca_subject_name_der_equals_issuer_name_der() {
+            // A second, structurally different self-signed CA fixture as a
+            // cross-check (multi-RDN DN: CN + C + O).
+            let cert = load_one("slh_dsa_root_ca.pem");
+
+            assert_eq!(
+                cert.subject_name_der().unwrap(),
+                cert.issuer_name_der().unwrap(),
+                "self-signed CA subject/issuer Name DER must match"
+            );
+        }
+
+        #[test]
+        fn good_cert_has_subject_key_id_bytes_but_no_authority_key_id() {
+            // good.pem carries an SKI (20-octet key id) and NO AKI extension.
+            let cert = load_one("good.pem");
+
+            let ski = cert.subject_key_id_bytes().unwrap();
+            assert!(ski.is_some(), "good.pem carries an SKI extension");
+            let ski = ski.unwrap();
+            assert_eq!(ski.len(), 20, "SKI key id is a 20-octet SHA-1 hash");
+            // Matches the openssl-reported SKI 1D:33:53:BC:... for good.pem.
+            assert_eq!(
+                &ski[..4],
+                &[0x1D, 0x33, 0x53, 0xBC],
+                "SKI key id matches the fixture's first octets"
+            );
+
+            assert!(
+                cert.authority_key_id_bytes().unwrap().is_none(),
+                "good.pem has no AKI extension, so no AKI key id"
+            );
+        }
+
+        #[test]
+        fn ski_missing_ca_has_no_subject_key_id_bytes() {
+            // rfc5280_ski_missing_ca.pem deliberately omits the SKI extension.
+            let cert = load_one("rfc5280_ski_missing_ca.pem");
+
+            assert!(
+                cert.subject_key_id_bytes().unwrap().is_none(),
+                "the SKI-missing fixture returns None (not Err)"
+            );
+        }
+
+        #[test]
+        fn self_signed_ca_with_aki_exposes_key_id_bytes() {
+            // slh_dsa_root_ca.pem carries both SKI and AKI (it is self-signed, so
+            // its AKI key id equals its own SKI key id).
+            let cert = load_one("slh_dsa_root_ca.pem");
+
+            let ski = cert.subject_key_id_bytes().unwrap();
+            let aki = cert.authority_key_id_bytes().unwrap();
+
+            assert!(ski.is_some(), "root CA carries an SKI");
+            assert!(aki.is_some(), "root CA carries an AKI key id");
+            assert_eq!(
+                ski, aki,
+                "a self-signed root's AKI key id equals its SKI key id"
+            );
+        }
+
+        #[test]
+        fn good_cert_tbs_and_signature_and_spki_are_non_empty() {
+            let cert = load_one("good.pem");
+
+            let tbs = cert.tbs_der().unwrap();
+            let sig = cert.signature_value_bytes().unwrap();
+            let spki = cert.issuer_spki_bytes().unwrap();
+
+            assert!(!tbs.is_empty(), "tbs_der is non-empty");
+            assert_eq!(tbs[0], TAG_SEQUENCE, "tbsCertificate is a SEQUENCE");
+            // RSA-2048 signature is 256 octets.
+            assert_eq!(sig.len(), 256, "RSA-2048 signature is 256 octets");
+            assert!(!spki.is_empty(), "issuer_spki_bytes is non-empty");
+            assert_eq!(spki[0], TAG_SEQUENCE, "SPKI is a SEQUENCE (full DER)");
+        }
+
+        #[test]
+        fn tbs_der_is_a_subslice_of_the_certificate_der() {
+            // The TBS DER must appear verbatim inside the full certificate DER.
+            let cert = load_one("good.pem");
+
+            let tbs = cert.tbs_der().unwrap();
+            let der = cert.der_bytes();
+
+            assert!(
+                der.windows(tbs.len()).any(|w| w == tbs.as_slice()),
+                "the TBS DER is a contiguous slice of the certificate DER"
+            );
+        }
+
+        #[test]
+        fn good_cert_signature_algorithm_oid_is_sha256_rsa() {
+            // signature_algorithm_oid() is the existing accessor the verify
+            // module dispatches on; confirm the known OID for good.pem.
+            let cert = load_one("good.pem");
+
+            assert_eq!(
+                cert.signature_algorithm_oid().unwrap(),
+                "1.2.840.113549.1.1.11",
+                "good.pem is signed with sha256WithRSAEncryption"
+            );
+        }
+
+        #[test]
+        fn chain_bundle_certs_expose_name_der_and_ski() {
+            // chain_bundle.pem holds two certs; each exposes a non-empty Name DER
+            // and a present SKI. (Cross-cert linkage is covered by task 04's
+            // dedicated chain fixtures.)
+            let path = format!(
+                "{}/../../testdata/chain_bundle.pem",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let bytes = std::fs::read(&path).unwrap();
+            let certs = Cert::from_pem(&bytes).unwrap();
+            assert_eq!(certs.len(), 2, "chain_bundle has two certs");
+
+            for cert in &certs {
+                assert!(!cert.subject_name_der().unwrap().is_empty());
+                assert!(!cert.issuer_name_der().unwrap().is_empty());
+                assert!(
+                    cert.subject_key_id_bytes().unwrap().is_some(),
+                    "each chain_bundle cert carries an SKI"
+                );
+                assert!(!cert.tbs_der().unwrap().is_empty());
+                assert!(!cert.signature_value_bytes().unwrap().is_empty());
+                assert!(!cert.issuer_spki_bytes().unwrap().is_empty());
+            }
         }
     }
 

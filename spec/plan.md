@@ -233,7 +233,8 @@ webpki-roots    = "1"     # root store for chain verification (or swap for an OS
 
 - Auto-registration of lints (`inventory`/`linkme`) so adding a file is enough.
 - A `--list-lints` command that prints id/source/description.
-- Chain-aware lints (path length, name constraints) once single-cert lints are solid.
+- Chain-aware lints (path length, name constraints) once single-cert lints are solid. *(Now being
+  specced as **feature 15** — `spec/features/15-chain-aware-lints/`; see the enhancement backlog below.)*
 - Swap `x509-parser` for a hand-rolled DER parser behind the same `Cert` facade — the original
   learning goal, made safe by the existing test suite.
 - Revocation: parse CRLDP/AIA and (optionally, behind a flag) fetch + check.
@@ -251,3 +252,56 @@ as their own report section (or a new `RuleSource`/lint category for TLS-config 
   suite and, ideally, enumerate the host's accepted suites; flag weak/legacy suites (RC4, 3DES,
   non-AEAD, export). Enumeration likely needs lower-level control than `rustls` exposes by default,
   so this may want a dedicated probe path — scope it when we get there.
+
+## Enhancement backlog (captured 2026-06-19)
+
+Candidate work beyond the shipped features 01–14. Chain-aware *structural* lints are being specced
+separately as **feature 15** (`spec/features/15-chain-aware-lints/`); everything below is captured
+here as future work and is **not yet specced**.
+
+### Deepen lint coverage
+
+- **Chain signature verification** *(now FOLDED INTO feature 15 — no longer deferred).* Verify each
+  chain link's signature against its issuer's public key — the highest-value chain check. It is being
+  specced in feature 15 as the lint `chain_signature_valid` (behind a `verify` cargo feature) using a
+  **pure-Rust** crypto stack: `ring` (classical RSA/ECDSA/Ed25519, already in the workspace via
+  `crates/fetch`) plus the pure-Rust `fips204` (ML-DSA / FIPS 204) and `fips205` (SLH-DSA / FIPS 205)
+  crates for PQC — so **NO openssl / aws-lc is required** for PQC verification (correcting the earlier
+  note that full PQC implied openssl/aws-lc). Policy: verify FAILS → Error, SUCCEEDS → pass, unsupported
+  algorithm → Notice (fail-open). Maturity caveat: `fips204`/`fips205` are pre-1.0 / generally
+  unaudited — acceptable for a verifier reasoning over PUBLIC certificate data, not for protecting
+  secrets.
+- **Endpoint chain lints** *(deferred from feature 15).* `chain_root_is_self_signed` and
+  `chain_leaf_not_self_issued` sanity — they need the whole-chain view rather than feature 15's clean
+  pairwise (subject, issuer) model, so they were held back.
+- **PQC extensions** (build on feature 13):
+  - **ML-KEM (FIPS 203)** key/cert lints — the KEM / key-establishment counterpart to feature 13's
+    signature algorithms (SPKI/params-absent, key length, KeyUsage = `keyEncipherment`/`keyAgreement`
+    permitted, `digitalSignature` forbidden — the mirror image of the signature rules).
+  - **Composite** PQC+classical signatures / KEM (`draft-ietf-lamps-pq-composite-*`, still draft).
+  - Close the gap in `pqc_key_usage_consistency` so it also flags **`dataEncipherment`** /
+    `encipherOnly` / `decipherOnly` on a PQC signature key (today only `keyEncipherment` /
+    `keyAgreement` are flagged).
+- **Fuller CA/Browser Forum parity.** The `cabf_br` / `cabf_ev` / `cabf_cs` / `cabf_smime` sources
+  ship curated subsets; expand toward fuller zlint parity, appended to the existing sources and
+  `applies()`-scoped so existing fixtures don't cascade (the feature-12 pattern).
+
+### Robustness & integration
+
+- **CI & supply-chain gates.** A GitHub Actions workflow running `cargo fmt --check`,
+  `cargo clippy --all-targets -- -D warnings`, `cargo test` (including the `fetch` and `pqc` feature
+  builds) and `cargo audit` — with actions pinned by commit SHA, `permissions: contents: read`, and
+  `cargo-deny`. Locks in the quality gates currently run by hand (OWASP A03). No CI exists yet.
+- **cert-bar conformance harness.** Operationalize the independent-oracle role: generate cert-bar's
+  full output matrix and run the linter over every certificate, failing on findings. Would have
+  caught the keyEncipherment-on-PQC bug automatically (since fixed in cert-helper 0.4.5). Keep
+  fixtures openssl-only so the linter never *depends* on cert-bar.
+- **Fuzzing & property tests.** `cargo-fuzz` over the DER / parse paths (parsing untrusted certs is
+  the linter's whole job) plus `proptest` for the facade and lint logic.
+- **SARIF output** (`--format sarif`). Emit findings as SARIF so CI can surface them as GitHub
+  code-scanning annotations.
+
+### Already documented elsewhere
+
+- The reserved `--purpose client` value is documented but not implemented (currently behaves like
+  `generic`).

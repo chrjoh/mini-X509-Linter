@@ -17,7 +17,24 @@ thiserror = "2"
 # Pinned 2026-06-16 to latest stable 1.0.228; keeps the core crate lean by default.
 serde = { version = "1", features = ["derive"], optional = true }
 
+# Pure-Rust crypto for chain_signature_valid (feature = "verify"). NO openssl /
+# aws-lc, NO cmake. Behind the `verify` feature so the default library build
+# stays dependency-light (the CLI enables `verify` by default).
+# `ring` provides classical RSA / ECDSA / Ed25519 verification and is already in
+# the workspace via crates/fetch (rustls' ring provider) and rcgen; pinned to the
+# 0.17.14 already resolved in Cargo.lock.
+ring = { version = "0.17", optional = true }
+# `fips204` (ML-DSA / FIPS 204) and `fips205` (SLH-DSA / FIPS 205) are pure-Rust,
+# pre-1.0, generally unaudited — acceptable for a verifier over PUBLIC cert data,
+# not for protecting secrets.
+fips204 = { version = "0.4", optional = true }
+fips205 = { version = "0.4", optional = true }
+
 [features]
 # Off by default to keep the core crate dependency-free; enable for JSON output.
 default = []
 serde = ["dep:serde"]
+# Enables the cryptographic chain_signature_valid lint and pulls in the pure-Rust
+# crypto stack. Off by default (library stays dependency-light); the CLI turns it
+# on. Without `verify` the chain registry holds 7 lints; with it, 8.
+verify = ["dep:ring", "dep:fips204", "dep:fips205"]

@@ -13,13 +13,15 @@
 //! viable.
 
 use anyhow::{Context, Result};
-use linter::{Applicability, Finding, LintOutcome, RuleSource, Severity};
+use linter::{Applicability, ChainLinkReport, Finding, LintOutcome, RuleSource, Severity};
 
 /// The fixed group order used by the text formatter.
 ///
 /// Listing the sources explicitly (rather than deriving order from the input)
-/// keeps text output stable regardless of registry ordering.
-const SOURCE_ORDER: [RuleSource; 7] = [
+/// keeps text output stable regardless of registry ordering. `Chain` sits last:
+/// it is the only cross-certificate source and only appears under `--chain` /
+/// `--from-host`, so it reads naturally after the seven per-cert sources.
+const SOURCE_ORDER: [RuleSource; 8] = [
     RuleSource::Rfc5280,
     RuleSource::Pqc,
     RuleSource::CabfBr,
@@ -27,6 +29,7 @@ const SOURCE_ORDER: [RuleSource; 7] = [
     RuleSource::CabfCs,
     RuleSource::CabfSmime,
     RuleSource::Hygiene,
+    RuleSource::Chain,
 ];
 
 /// Controls how passing / not-applicable lints are rendered in text output.
@@ -162,6 +165,7 @@ fn source_label(source: RuleSource) -> &'static str {
         RuleSource::CabfCs => "cabf_cs",
         RuleSource::CabfSmime => "cabf_smime",
         RuleSource::Hygiene => "hygiene",
+        RuleSource::Chain => "chain",
     }
 }
 
@@ -468,6 +472,128 @@ pub fn render_json(outcomes: &[LintOutcome], min: Severity) -> Result<String> {
         .collect();
 
     serde_json::to_string_pretty(&filtered).context("failed to serialize lint outcomes to JSON")
+}
+
+/// One link of the built chain, paired with the human-readable labels the CLI
+/// derived from its `subject_index` / `issuer_index` (via `chain_label`).
+///
+/// Keeping label derivation in `main.rs` (the home of `chain_label`) and the
+/// rendering here mirrors how `CertReport` carries a pre-built `label`.
+#[derive(Debug, Clone)]
+pub struct ChainLinkView<'a> {
+    /// Label for the subject (lower) cert, e.g. `"Certificate 1 (leaf)"`.
+    pub subject_label: String,
+    /// Label for the issuer (upper) cert, e.g. `"Certificate 2"`.
+    pub issuer_label: String,
+    /// The engine's report for this link (one outcome per chain lint).
+    pub report: &'a ChainLinkReport,
+}
+
+/// Renders the chain-level section from the built chain's per-link reports.
+///
+/// The block is appended AFTER the per-cert report (and, on `--from-host`, after
+/// the verdict). Layout, for each built link in leaf→top order:
+///
+/// ```text
+/// Chain checks:
+/// Certificate 1 (leaf) → Certificate 2
+///   notice [chain_not_in_order] certificates were not in leaf-to-root order; reordered for analysis
+/// Certificate 2 → Certificate 3
+///   (no findings)
+/// ```
+///
+/// Each surfaced finding renders as `  <severity> [<lint_id>] <message>`,
+/// matching the per-cert path. A link whose findings all fall below `min`
+/// renders the `  (no findings)` placeholder. Output is deterministic: link
+/// order follows the built chain, outcomes follow registration order, and there
+/// are no timestamps.
+///
+/// A **chain-level** report (see [`ChainLinkReport::is_chain_level`]) — emitted
+/// when a ≥2-cert set collapses to fewer than two linked positions (a broken
+/// chain) — is rendered under a `(whole chain)` heading instead of a misleading
+/// `Certificate N → Certificate M` link arrow, since there is no real adjacent
+/// link to label.
+pub fn render_chain_section(links: &[ChainLinkView<'_>], min: Severity) -> String {
+    let mut out = String::new();
+    out.push_str("Chain checks:\n");
+    for link in links {
+        if link.report.is_chain_level() {
+            out.push_str("(whole chain)\n");
+        } else {
+            out.push_str(&format!("{} → {}\n", link.subject_label, link.issuer_label));
+        }
+        let mut any = false;
+        for outcome in &link.report.outcomes {
+            for finding in &outcome.findings {
+                if finding.severity < min {
+                    continue;
+                }
+                any = true;
+                out.push_str(&format!(
+                    "  {} [{}] {}\n",
+                    severity_label(finding.severity),
+                    outcome.lint_id,
+                    finding.message
+                ));
+            }
+        }
+        if !any {
+            out.push_str("  (no findings)\n");
+        }
+    }
+    out
+}
+
+/// Builds the `chain` JSON array from the built chain's per-link reports.
+///
+/// One object per link: `{ "subject": <label>, "issuer": <label>, "outcomes":
+/// [ { "lint_id", "source", "findings" }, … ] }`. Findings are filtered to `min`
+/// and above; every outcome (incl. passing ones) is retained so the chain lint
+/// roster stays visible. Outcome order follows the engine (registration order).
+///
+/// A **chain-level** report (see [`ChainLinkReport::is_chain_level`]) — emitted
+/// for a broken set that collapses to fewer than two linked positions — has no
+/// real `(subject, issuer)` link, so it serializes as
+/// `{ "scope": "chain", "outcomes": [ … ] }` (a `scope` discriminator in place
+/// of the `subject` / `issuer` labels). Per-link entries are unchanged.
+///
+/// # Errors
+///
+/// Returns an error if serialization fails (which `serde_json` does not do for
+/// these in-memory types in practice; the fallible API is honoured rather than
+/// panicking).
+pub fn chain_links_json(links: &[ChainLinkView<'_>], min: Severity) -> Result<serde_json::Value> {
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(links.len());
+    for link in links {
+        let mut outcomes: Vec<serde_json::Value> = Vec::with_capacity(link.report.outcomes.len());
+        for outcome in &link.report.outcomes {
+            let findings: Vec<&Finding> = outcome
+                .findings
+                .iter()
+                .filter(|f| f.severity >= min)
+                .collect();
+            let findings_value = serde_json::to_value(&findings)
+                .context("failed to serialize chain link findings to JSON")?;
+            outcomes.push(serde_json::json!({
+                "lint_id": outcome.lint_id,
+                "source": source_label(outcome.source),
+                "findings": findings_value,
+            }));
+        }
+        if link.report.is_chain_level() {
+            entries.push(serde_json::json!({
+                "scope": "chain",
+                "outcomes": outcomes,
+            }));
+        } else {
+            entries.push(serde_json::json!({
+                "subject": link.subject_label,
+                "issuer": link.issuer_label,
+                "outcomes": outcomes,
+            }));
+        }
+    }
+    Ok(serde_json::Value::Array(entries))
 }
 
 /// A single certificate entry in the presented chain, for `--from-host` output.
@@ -1032,6 +1158,120 @@ mod tests {
             let first = render_json(&outcomes, Severity::Notice).unwrap();
             let second = render_json(&outcomes, Severity::Notice).unwrap();
             assert_eq!(first, second);
+        }
+    }
+
+    mod source_order {
+        use super::*;
+
+        #[test]
+        fn includes_chain_last() {
+            assert_eq!(SOURCE_ORDER.len(), 8);
+            assert_eq!(SOURCE_ORDER[7], RuleSource::Chain);
+        }
+
+        #[test]
+        fn chain_source_label() {
+            assert_eq!(source_label(RuleSource::Chain), "chain");
+        }
+    }
+
+    mod render_chain_section {
+        use super::*;
+        use linter::{ChainLinkOutcome, ChainLinkReport};
+
+        fn chain_outcome(lint_id: &'static str, findings: Vec<Finding>) -> ChainLinkOutcome {
+            ChainLinkOutcome {
+                lint_id,
+                source: RuleSource::Chain,
+                findings,
+            }
+        }
+
+        #[test]
+        fn renders_findings_and_placeholder_per_link() {
+            let report0 = ChainLinkReport {
+                subject_index: 0,
+                issuer_index: 1,
+                outcomes: vec![chain_outcome(
+                    "chain_not_in_order",
+                    vec![finding(Severity::Notice, "reordered")],
+                )],
+            };
+            let report1 = ChainLinkReport {
+                subject_index: 1,
+                issuer_index: 2,
+                outcomes: vec![chain_outcome("chain_aki_ski_match", vec![])],
+            };
+            let links = [
+                ChainLinkView {
+                    subject_label: "Certificate 1 (leaf)".to_string(),
+                    issuer_label: "Certificate 2".to_string(),
+                    report: &report0,
+                },
+                ChainLinkView {
+                    subject_label: "Certificate 2".to_string(),
+                    issuer_label: "Certificate 3".to_string(),
+                    report: &report1,
+                },
+            ];
+
+            let text = render_chain_section(&links, Severity::Notice);
+
+            assert!(text.starts_with("Chain checks:\n"));
+            assert!(text.contains("Certificate 1 (leaf) → Certificate 2\n"));
+            assert!(text.contains("  notice [chain_not_in_order] reordered\n"));
+            assert!(text.contains("Certificate 2 → Certificate 3\n"));
+            assert!(text.contains("  (no findings)\n"));
+        }
+
+        #[test]
+        fn respects_min_severity() {
+            let report = ChainLinkReport {
+                subject_index: 0,
+                issuer_index: 1,
+                outcomes: vec![chain_outcome(
+                    "chain_not_in_order",
+                    vec![finding(Severity::Notice, "hidden note")],
+                )],
+            };
+            let links = [ChainLinkView {
+                subject_label: "Certificate 1 (leaf)".to_string(),
+                issuer_label: "Certificate 2".to_string(),
+                report: &report,
+            }];
+
+            let text = render_chain_section(&links, Severity::Warn);
+
+            assert!(!text.contains("hidden note"));
+            assert!(text.contains("  (no findings)\n"));
+        }
+
+        #[test]
+        fn json_shape_carries_lint_id_source_findings() {
+            let report = ChainLinkReport {
+                subject_index: 0,
+                issuer_index: 1,
+                outcomes: vec![chain_outcome(
+                    "chain_subject_issuer_dn_match",
+                    vec![finding(Severity::Error, "broken chain")],
+                )],
+            };
+            let links = [ChainLinkView {
+                subject_label: "Certificate 1 (leaf)".to_string(),
+                issuer_label: "Certificate 2".to_string(),
+                report: &report,
+            }];
+
+            let value = chain_links_json(&links, Severity::Notice).unwrap();
+            let arr = value.as_array().unwrap();
+            assert_eq!(arr.len(), 1);
+            assert_eq!(arr[0]["subject"], "Certificate 1 (leaf)");
+            assert_eq!(arr[0]["issuer"], "Certificate 2");
+            let outcomes = arr[0]["outcomes"].as_array().unwrap();
+            assert_eq!(outcomes[0]["lint_id"], "chain_subject_issuer_dn_match");
+            assert_eq!(outcomes[0]["source"], "chain");
+            assert_eq!(outcomes[0]["findings"][0]["message"], "broken chain");
         }
     }
 }

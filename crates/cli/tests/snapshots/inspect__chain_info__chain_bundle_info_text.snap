@@ -52,3 +52,7 @@ Certificate 2
   (3 passed, 1 not applicable)
 OK: no findings
 summary: no findings
+
+Chain checks:
+(whole chain)
+  error [chain_subject_issuer_dn_match] certificate 2 (CN=Chain Test Root CA) does not link into the presented chain (unlinkable / extra certificate)
