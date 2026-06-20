@@ -14,6 +14,7 @@ Certificate Summary
   Public Key:          rsaEncryption (1.2.840.113549.1.1.1), 2048 bits
   Basic Constraints:   CA:false (not critical)
   Key Usage:           (not present)
+  Extended Key Usage:  serverAuth (not critical)
   Subject Key Id:      1D:33:53:BC:F1:E7:31:96:F9:67:D2:FC:72:0A:F0:96:7D:2F:4C:13
   Authority Key Id:    (not present)
   Subject Alt Name:    DNS:good.example.com (not critical)

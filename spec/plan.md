@@ -253,11 +253,12 @@ as their own report section (or a new `RuleSource`/lint category for TLS-config 
   non-AEAD, export). Enumeration likely needs lower-level control than `rustls` exposes by default,
   so this may want a dedicated probe path — scope it when we get there.
 
-## Enhancement backlog (captured 2026-06-19)
+## Enhancement backlog (captured 2026-06-19; updated 2026-06-20)
 
-Candidate work beyond the shipped features 01–14. Chain-aware *structural* lints are being specced
-separately as **feature 15** (`spec/features/15-chain-aware-lints/`); everything below is captured
-here as future work and is **not yet specced**.
+Candidate work beyond the shipped features 01–16. Chain-aware *structural* lints shipped as
+**feature 15** (`spec/features/15-chain-aware-lints/`), and the ML-KEM + KeyUsage-gap PQC extensions
+shipped as **feature 16** (`spec/features/16-pqc-extensions/`); the items below that are not marked
+DELIVERED are future work and are **not yet specced**.
 
 ### Deepen lint coverage
 
@@ -275,13 +276,22 @@ here as future work and is **not yet specced**.
   `chain_leaf_not_self_issued` sanity — they need the whole-chain view rather than feature 15's clean
   pairwise (subject, issuer) model, so they were held back.
 - **PQC extensions** (build on feature 13):
-  - **ML-KEM (FIPS 203)** key/cert lints — the KEM / key-establishment counterpart to feature 13's
-    signature algorithms (SPKI/params-absent, key length, KeyUsage = `keyEncipherment`/`keyAgreement`
-    permitted, `digitalSignature` forbidden — the mirror image of the signature rules).
-  - **Composite** PQC+classical signatures / KEM (`draft-ietf-lamps-pq-composite-*`, still draft).
-  - Close the gap in `pqc_key_usage_consistency` so it also flags **`dataEncipherment`** /
-    `encipherOnly` / `decipherOnly` on a PQC signature key (today only `keyEncipherment` /
-    `keyAgreement` are flagged).
+  - **ML-KEM (FIPS 203)** key/cert lints — *DELIVERED in **feature 16*** (`spec/features/16-pqc-extensions/`).
+    The KEM / key-establishment counterpart to feature 13's signature algorithms: four lints
+    (`pqc_mlkem_algorithm_known`, `pqc_mlkem_spki_parameters_absent`, `pqc_mlkem_public_key_length`,
+    `pqc_mlkem_key_usage_consistency`) gating on a new `PublicKeyAlg::MlKem` / the "kems" OID arc
+    `2.16.840.1.101.3.4.4.{1,2,3}`, with the mirror-image KeyUsage rule
+    (`keyEncipherment`/`keyAgreement` permitted, signing bits `digitalSignature`/`keyCertSign`/`cRLSign`
+    forbidden).
+  - Close the gap in `pqc_key_usage_consistency` — *DELIVERED in **feature 16***. It now also flags
+    **`dataEncipherment`** / `encipherOnly` / `decipherOnly` on a PQC signature key (previously only
+    `keyEncipherment` / `keyAgreement` were flagged).
+  - **Composite** PQC+classical signatures / KEM (`draft-ietf-lamps-pq-composite-*`, still draft) —
+    *STILL DEFERRED.* Scoped out of feature 16 at the user-review gate: stock OpenSSL 3.6.2 cannot mint
+    composite SPKIs (`genpkey` rejects the composite OIDs as unsupported) and the OIDs remain
+    provisional draft, so there is no honest openssl-only fixture path without hand-crafting the full
+    composite SPKI DER against a moving target. Revisit once OpenSSL (or another fixture-minting tool
+    that keeps the linter an independent oracle) gains support and the draft stabilises.
 - **Fuller CA/Browser Forum parity.** The `cabf_br` / `cabf_ev` / `cabf_cs` / `cabf_smime` sources
   ship curated subsets; expand toward fuller zlint parity, appended to the existing sources and
   `applies()`-scoped so existing fixtures don't cascade (the feature-12 pattern).

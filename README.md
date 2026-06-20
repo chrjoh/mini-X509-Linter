@@ -347,8 +347,9 @@ $ echo $?
 
 `--info` prints a deterministic **summary block** of the certificate's own fields — version,
 serial, subject and issuer DN, validity window, signature algorithm, public key,
-BasicConstraints, KeyUsage bits, SubjectKeyIdentifier, AuthorityKeyIdentifier (its
-`keyIdentifier`), and SubjectAltName — and then **still runs the lint report**
+BasicConstraints, KeyUsage bits, ExtendedKeyUsage purposes, SubjectKeyIdentifier,
+AuthorityKeyIdentifier (its `keyIdentifier`), and SubjectAltName — and then **still runs the
+lint report**
 below it. It never suppresses linting and never changes the exit code, so it is purely additive;
 omitting it leaves the output byte-for-byte unchanged.
 
@@ -365,6 +366,7 @@ Certificate Summary
   Public Key:          rsaEncryption (1.2.840.113549.1.1.1), 2048 bits
   Basic Constraints:   CA:false (not critical)
   Key Usage:           (not present)
+  Extended Key Usage:  serverAuth (not critical)
   Subject Key Id:      1D:33:53:BC:F1:E7:31:96:F9:67:D2:FC:72:0A:F0:96:7D:2F:4C:13
   Authority Key Id:    (not present)
   Subject Alt Name:    DNS:good.example.com (not critical)
@@ -391,6 +393,7 @@ Certificate Summary
   Public Key:          SLH-DSA-SHA2-128s (2.16.840.1.101.3.4.3.20)
   Basic Constraints:   CA:true (critical)
   Key Usage:           Certificate Sign, CRL Sign (critical)
+  Extended Key Usage:  (not present)
   Subject Key Id:      3C:B2:20:74:AC:49:56:3D:94:72:6C:9A:22:9A:66:DD:51:70:10:01
   Authority Key Id:    3C:B2:20:74:AC:49:56:3D:94:72:6C:9A:22:9A:66:DD:51:70:10:01
   Subject Alt Name:    DNS:slh-dsa-test-root (not critical)

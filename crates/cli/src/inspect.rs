@@ -2,8 +2,9 @@
 //!
 //! Builds a deterministic, stable-field-order summary of a certificate's *own*
 //! values (version, serial, subject/issuer DN, validity, signature algorithm,
-//! public key, BasicConstraints, KeyUsage, SubjectAltName) from the read-only
-//! [`Cert`] facade inspection accessors. The summary is purely additive display;
+//! public key, BasicConstraints, KeyUsage, ExtendedKeyUsage, SubjectKeyId,
+//! AuthorityKeyId, SubjectAltName) from the read-only [`Cert`] facade
+//! inspection accessors. The summary is purely additive display;
 //! it does not touch the lint engine.
 //!
 //! Two surfaces are exposed:
@@ -60,6 +61,8 @@ pub struct CertSummary {
     pub basic_constraints: Option<BasicConstraintsDisplay>,
     /// The Key Usage extension, or `None` when absent.
     pub key_usage: Option<KeyUsageDisplay>,
+    /// The Extended Key Usage extension, or `None` when absent.
+    pub extended_key_usage: Option<EkuDisplay>,
     /// The Subject Key Identifier as uppercase, colon-separated hex, or `None`
     /// when the extension is absent (or unreadable).
     pub subject_key_id: Option<String>,
@@ -178,6 +181,46 @@ impl KeyUsageDisplay {
         };
         format!("{bits} {}", critical_label(self.critical))
     }
+}
+
+/// A display-oriented view of the Extended Key Usage extension.
+#[derive(Debug, Clone)]
+pub struct EkuDisplay {
+    /// Every asserted EKU purpose, each as its canonical name when recognised
+    /// (e.g. `serverAuth`) or its raw dotted OID otherwise, in encounter order.
+    pub purposes: Vec<String>,
+    /// Whether the extension is marked critical.
+    pub critical: bool,
+}
+
+impl EkuDisplay {
+    /// Renders the purposes joined by `", "`, plus the criticality. An (unusual)
+    /// EKU with no key purposes renders a clear marker.
+    fn render(&self) -> String {
+        let purposes = if self.purposes.is_empty() {
+            "(no purposes)".to_string()
+        } else {
+            self.purposes.join(", ")
+        };
+        format!("{purposes} {}", critical_label(self.critical))
+    }
+}
+
+/// Maps a well-known Extended Key Usage purpose OID to its canonical short name
+/// (RFC 5280 §4.2.1.12 + common purposes), or returns the raw dotted OID
+/// unchanged when unrecognised — so an uncommon purpose is always displayed.
+fn eku_purpose_label(oid: &str) -> String {
+    match oid {
+        "1.3.6.1.5.5.7.3.1" => "serverAuth",
+        "1.3.6.1.5.5.7.3.2" => "clientAuth",
+        "1.3.6.1.5.5.7.3.3" => "codeSigning",
+        "1.3.6.1.5.5.7.3.4" => "emailProtection",
+        "1.3.6.1.5.5.7.3.8" => "timeStamping",
+        "1.3.6.1.5.5.7.3.9" => "OCSPSigning",
+        "2.5.29.37.0" => "anyExtendedKeyUsage",
+        other => return other.to_string(),
+    }
+    .to_string()
 }
 
 /// A single Subject Alternative Name entry as a `kind:value` pair.
@@ -307,6 +350,15 @@ pub fn build_summary(cert: &Cert) -> CertSummary {
             critical: ku.critical,
         });
 
+    let extended_key_usage = cert
+        .extended_key_usage()
+        .ok()
+        .flatten()
+        .map(|eku| EkuDisplay {
+            purposes: eku.oids.iter().map(|o| eku_purpose_label(o)).collect(),
+            critical: eku.critical,
+        });
+
     // SKI and the AKI keyIdentifier: an accessor Err and an absent extension
     // both collapse to `None`, rendered as the absent marker (mirrors the
     // BasicConstraints / KeyUsage / SAN handling above).
@@ -343,6 +395,7 @@ pub fn build_summary(cert: &Cert) -> CertSummary {
         public_key,
         basic_constraints,
         key_usage,
+        extended_key_usage,
         subject_key_id,
         authority_key_id,
         subject_alt_name,
@@ -365,9 +418,10 @@ fn hex_colon(bytes: &[u8]) -> String {
 /// `version`, `serial`, `subject`, `issuer`, `validity` (`not_before` /
 /// `not_after`), `signature_algorithm` (`oid` / `name`), `public_key`
 /// (`algorithm` / `key_bits` / `curve`), `basic_constraints` (`null` when
-/// absent), `key_usage` (`null` when absent), `subject_key_id` (`null` when
-/// absent), `authority_key_id` (`null` when absent), and `subject_alt_name`
-/// (`null` when absent). Folded under the `summary` key by `main.rs`.
+/// absent), `key_usage` (`null` when absent), `extended_key_usage` (`null` when
+/// absent), `subject_key_id` (`null` when absent), `authority_key_id` (`null`
+/// when absent), and `subject_alt_name` (`null` when absent). Folded under the
+/// `summary` key by `main.rs`.
 pub fn build_summary_json(cert: &Cert) -> Value {
     let s = build_summary(cert);
 
@@ -402,6 +456,14 @@ pub fn build_summary_json(cert: &Cert) -> Value {
         None => Value::Null,
     };
 
+    let extended_key_usage = match &s.extended_key_usage {
+        Some(eku) => json!({
+            "purposes": eku.purposes,
+            "critical": eku.critical,
+        }),
+        None => Value::Null,
+    };
+
     let subject_alt_name = match &s.subject_alt_name {
         Some(san) => {
             let entries: Vec<Value> = san
@@ -430,6 +492,7 @@ pub fn build_summary_json(cert: &Cert) -> Value {
         "public_key": public_key,
         "basic_constraints": basic_constraints,
         "key_usage": key_usage,
+        "extended_key_usage": extended_key_usage,
         "subject_key_id": s.subject_key_id,
         "authority_key_id": s.authority_key_id,
         "subject_alt_name": subject_alt_name,
@@ -461,8 +524,8 @@ fn key_usage_names(ku: &KeyUsageBits) -> Vec<String> {
 ///
 /// Field order is fixed: Version, Serial, Subject, Issuer, Validity
 /// (notBefore / notAfter), Signature Algorithm, Public Key, BasicConstraints,
-/// KeyUsage, SubjectKeyId, AuthorityKeyId, SubjectAltName. Absent extensions
-/// and unreadable fields print a
+/// KeyUsage, ExtendedKeyUsage, SubjectKeyId, AuthorityKeyId, SubjectAltName.
+/// Absent extensions and unreadable fields print a
 /// clear marker; there are no timestamps beyond the certificate's own dates, so
 /// the block is snapshot-friendly.
 pub fn render_summary_text(cert: &Cert) -> String {
@@ -502,6 +565,12 @@ pub fn render_summary_text(cert: &Cert) -> String {
         .as_ref()
         .map_or_else(|| ABSENT.to_string(), KeyUsageDisplay::render);
     let _ = writeln!(out, "  Key Usage:           {ku}");
+
+    let eku = summary
+        .extended_key_usage
+        .as_ref()
+        .map_or_else(|| ABSENT.to_string(), EkuDisplay::render);
+    let _ = writeln!(out, "  Extended Key Usage:  {eku}");
 
     let ski = summary.subject_key_id.as_deref().unwrap_or(ABSENT);
     let _ = writeln!(out, "  Subject Key Id:      {ski}");
@@ -546,6 +615,7 @@ mod tests {
                 "Public Key:",
                 "Basic Constraints:",
                 "Key Usage:",
+                "Extended Key Usage:",
                 "Subject Key Id:",
                 "Authority Key Id:",
                 "Subject Alt Name:",
@@ -593,6 +663,43 @@ mod tests {
             let text = render_summary_text(&cert);
             assert!(text.contains(&format!("Subject Key Id:      {ski}")));
             assert!(text.contains(&format!("Authority Key Id:    {ABSENT}")));
+        }
+    }
+
+    mod eku_display {
+        use super::*;
+
+        #[test]
+        fn labels_known_purposes_by_name() {
+            assert_eq!(eku_purpose_label("1.3.6.1.5.5.7.3.1"), "serverAuth");
+            assert_eq!(eku_purpose_label("1.3.6.1.5.5.7.3.4"), "emailProtection");
+            assert_eq!(eku_purpose_label("2.5.29.37.0"), "anyExtendedKeyUsage");
+        }
+
+        #[test]
+        fn unknown_purpose_falls_back_to_raw_oid() {
+            assert_eq!(
+                eku_purpose_label("1.3.6.1.4.1.311.10.3.4"),
+                "1.3.6.1.4.1.311.10.3.4"
+            );
+        }
+
+        #[test]
+        fn render_lists_purposes_with_criticality() {
+            let eku = EkuDisplay {
+                purposes: vec!["serverAuth".to_string(), "clientAuth".to_string()],
+                critical: false,
+            };
+            assert_eq!(eku.render(), "serverAuth, clientAuth (not critical)");
+        }
+
+        #[test]
+        fn render_marks_empty_purpose_set() {
+            let eku = EkuDisplay {
+                purposes: vec![],
+                critical: true,
+            };
+            assert_eq!(eku.render(), "(no purposes) (critical)");
         }
     }
 

@@ -13,6 +13,12 @@ expression: summaries
         "critical": false,
         "path_len": null
       },
+      "extended_key_usage": {
+        "critical": false,
+        "purposes": [
+          "serverAuth"
+        ]
+      },
       "issuer": "CN=chain-leaf.example.com",
       "key_usage": null,
       "public_key": {
@@ -55,6 +61,7 @@ expression: summaries
         "critical": true,
         "path_len": null
       },
+      "extended_key_usage": null,
       "issuer": "CN=Chain Test Root CA",
       "key_usage": {
         "bits": [

@@ -10,6 +10,12 @@ expression: "value[\"summary\"]"
     "critical": false,
     "path_len": null
   },
+  "extended_key_usage": {
+    "critical": false,
+    "purposes": [
+      "serverAuth"
+    ]
+  },
   "issuer": "CN=good.example.com",
   "key_usage": null,
   "public_key": {
