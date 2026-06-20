@@ -510,6 +510,24 @@ pub fn default_registry_with_now(now_unix: Option<i64>) -> Registry {
         Box::new(cabf_br::SubjectContainsReservedIp::new()),
         Box::new(cabf_br::ExtraSubjectCommonNames::new()),
         Box::new(cabf_br::SubjectCountryNotIso::new()),
+        // CA/Browser Forum BR depth-expansion lints (feature 17). Appended after
+        // the feature-12 BR block; order is deterministic and matters for the
+        // feature 06 golden test — keep it stable. All twelve are broad-scoped
+        // (NotApplicable on every CA, Applies on every non-CA leaf). Lints 7, 8,
+        // 12 (san_present, certificate_policies_present, basic_constraints_present)
+        // are Warn severity; the rest are Error.
+        Box::new(cabf_br::SubscriberKeyUsageCertSignProhibited::new()),
+        Box::new(cabf_br::SubscriberKeyUsageCrlSignProhibited::new()),
+        Box::new(cabf_br::SubscriberBasicConstraintsPathLenProhibited::new()),
+        Box::new(cabf_br::ExtKeyUsageAnyProhibited::new()),
+        Box::new(cabf_br::ExtKeyUsageServerAuthRequired::new()),
+        Box::new(cabf_br::SanDnsOrIpOnly::new()),
+        Box::new(cabf_br::SanPresent::new()),
+        Box::new(cabf_br::CertificatePoliciesPresent::new()),
+        Box::new(cabf_br::CertificatePoliciesReservedOid::new()),
+        Box::new(cabf_br::RsaModulusBitsMultipleOf8::new()),
+        Box::new(cabf_br::RsaPublicExponentInRange::new()),
+        Box::new(cabf_br::BasicConstraintsPresent::new()),
         // CA/Browser Forum EV (Extended Validation) Guidelines lints (feature 11).
         // Appended after the cabf_br block and before the cabf_cs block, mirroring
         // the SOURCE_ORDER position (EV directly after BR, since EV ⊂ BR). Order is
@@ -882,22 +900,23 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
 
             // Expect: the four hygiene lints, all sixteen RFC 5280 lints, the five
             // post-quantum signature (Pqc) lints, the four post-quantum ML-KEM
-            // (Pqc) lints, the twelve CA/Browser Forum BR lints, the nine
+            // (Pqc) lints, the twenty-four CA/Browser Forum BR lints, the nine
             // CA/Browser Forum EV lints, the eight CA/Browser Forum Code-Signing
             // lints, and the twelve CA/Browser Forum S/MIME lints are wired in and
             // reported — one outcome per registered lint. Count baseline:
             // pre-feature-16 total was 66 (61 pre-pqc + the five ML-DSA / SLH-DSA
             // signature pqc lints); feature 16 adds the four ML-KEM lints
             // (part 3 adds 0 lints — it only extends an existing lint's findings),
-            // making the new total 70. `sample_cert()` is a self-signed RSA CA with
+            // making the total 70; feature 17 adds twelve new cabf_br lints
+            // (12 → 24), making the new total 82. `sample_cert()` is a self-signed RSA CA with
             // no codeSigning or emailProtection EKU, no EV policy OID, and a
             // classical (RSA) key, so the BR/EV/CS/SMIME lints, the leaf-only
             // rfc5280 lints, and the SPKI-self-gated pqc/ML-KEM lints are
             // `NotApplicable` but still produce one outcome each, keeping the
             // outcome count equal to the registry length.
             assert!(!registry.is_empty());
-            assert_eq!(registry.len(), 70);
-            assert_eq!(outcomes.len(), 70);
+            assert_eq!(registry.len(), 82);
+            assert_eq!(outcomes.len(), 82);
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
             for expected in [
@@ -942,6 +961,18 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "cabf_br_subject_contains_reserved_ip",
                 "cabf_br_extra_subject_common_names",
                 "cabf_br_subject_country_not_iso",
+                "cabf_br_subscriber_key_usage_cert_sign_prohibited",
+                "cabf_br_subscriber_key_usage_crl_sign_prohibited",
+                "cabf_br_subscriber_basic_constraints_path_len_prohibited",
+                "cabf_br_ext_key_usage_any_prohibited",
+                "cabf_br_ext_key_usage_server_auth_required",
+                "cabf_br_san_dns_or_ip_only",
+                "cabf_br_san_present",
+                "cabf_br_certificate_policies_present",
+                "cabf_br_certificate_policies_reserved_oid",
+                "cabf_br_rsa_modulus_bits_multiple_of_8",
+                "cabf_br_rsa_public_exponent_in_range",
+                "cabf_br_basic_constraints_present",
                 "cabf_ev_organization_name_missing",
                 "cabf_ev_business_category_missing",
                 "cabf_ev_business_category_invalid",
@@ -1090,7 +1121,7 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
         #[test]
         fn cabf_br_source_filter_runs_exactly_the_cabf_br_set() {
             // Setup & Invoke: filtering by RuleSource::CabfBr must select the
-            // twelve BR lints and nothing else (no RFC 5280 or hygiene lints).
+            // twenty-four BR lints and nothing else (no RFC 5280 or hygiene lints).
             // Filtering is by source, before applicability, so the BR lints
             // appear even though `sample_cert()` is a CA (they are NotApplicable
             // but still emitted as outcomes).
@@ -1099,7 +1130,7 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
             let outcomes = registry.run_filtered(&cert, &[RuleSource::CabfBr]);
 
             // Expect
-            assert_eq!(outcomes.len(), 12);
+            assert_eq!(outcomes.len(), 24);
             assert!(outcomes.iter().all(|o| o.source == RuleSource::CabfBr));
 
             let ids: Vec<&str> = outcomes.iter().map(|o| o.lint_id).collect();
@@ -1116,6 +1147,18 @@ Ik5TwbV8Htq6fEgstPgecyX8Pw==
                 "cabf_br_subject_contains_reserved_ip",
                 "cabf_br_extra_subject_common_names",
                 "cabf_br_subject_country_not_iso",
+                "cabf_br_subscriber_key_usage_cert_sign_prohibited",
+                "cabf_br_subscriber_key_usage_crl_sign_prohibited",
+                "cabf_br_subscriber_basic_constraints_path_len_prohibited",
+                "cabf_br_ext_key_usage_any_prohibited",
+                "cabf_br_ext_key_usage_server_auth_required",
+                "cabf_br_san_dns_or_ip_only",
+                "cabf_br_san_present",
+                "cabf_br_certificate_policies_present",
+                "cabf_br_certificate_policies_reserved_oid",
+                "cabf_br_rsa_modulus_bits_multiple_of_8",
+                "cabf_br_rsa_public_exponent_in_range",
+                "cabf_br_basic_constraints_present",
             ] {
                 assert!(
                     ids.contains(&expected),

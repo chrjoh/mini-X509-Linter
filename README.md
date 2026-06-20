@@ -367,7 +367,7 @@ Certificate Summary
   Basic Constraints:   CA:false (not critical)
   Key Usage:           (not present)
   Extended Key Usage:  serverAuth (not critical)
-  Subject Key Id:      1D:33:53:BC:F1:E7:31:96:F9:67:D2:FC:72:0A:F0:96:7D:2F:4C:13
+  Subject Key Id:      80:31:B9:6A:1E:A6:B8:88:63:FC:6C:BF:58:97:4F:67:6D:CD:E0:83
   Authority Key Id:    (not present)
   Subject Alt Name:    DNS:good.example.com (not critical)
 
@@ -394,8 +394,8 @@ Certificate Summary
   Basic Constraints:   CA:true (critical)
   Key Usage:           Certificate Sign, CRL Sign (critical)
   Extended Key Usage:  (not present)
-  Subject Key Id:      3C:B2:20:74:AC:49:56:3D:94:72:6C:9A:22:9A:66:DD:51:70:10:01
-  Authority Key Id:    3C:B2:20:74:AC:49:56:3D:94:72:6C:9A:22:9A:66:DD:51:70:10:01
+  Subject Key Id:      AB:2E:29:C6:D1:3F:AE:A1:93:8A:60:C8:2D:1E:84:87:0F:F2:E7:3D
+  Authority Key Id:    AB:2E:29:C6:D1:3F:AE:A1:93:8A:60:C8:2D:1E:84:87:0F:F2:E7:3D
   Subject Alt Name:    DNS:slh-dsa-test-root (not critical)
 
 [rfc5280]

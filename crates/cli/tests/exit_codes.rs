@@ -148,15 +148,21 @@ mod chain {
 
     #[test]
     fn chain_exit_reflects_only_surfaced_findings() {
-        // With --fail-on warn and an all-pass linked chain, still 0 (no warns,
-        // no construction Notices: it is in leaf-to-root order and bundles its root).
+        // The chain links cleanly (leaf-to-root order, bundles its root) so the
+        // *chain* checks surface nothing and no construction Notices appear. The
+        // only surfaced finding is per-cert: under feature-17's broad BR scoping the
+        // subscriber leaf — which carries no CertificatePolicies extension — emits a
+        // `cabf_br_certificate_policies_present` Warn. That Warn does NOT reach the
+        // default `--fail-on error` (see `clean_chain_all_pass_exits_zero`), but it
+        // DOES reach `--fail-on warn`, so the exit flips to 1. This still proves the
+        // exit reflects exactly the surfaced findings at the chosen threshold.
         let code = exit_code(&[
             "--chain",
             &fixture_arg("chain_valid.pem"),
             "--fail-on",
             "warn",
         ]);
-        assert_eq!(code, Some(0));
+        assert_eq!(code, Some(1));
     }
 
     #[test]

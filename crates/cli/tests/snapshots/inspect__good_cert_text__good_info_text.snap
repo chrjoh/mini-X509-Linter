@@ -1,6 +1,5 @@
 ---
 source: crates/cli/tests/inspect.rs
-assertion_line: 112
 expression: out
 ---
 Certificate Summary
@@ -15,7 +14,7 @@ Certificate Summary
   Basic Constraints:   CA:false (not critical)
   Key Usage:           (not present)
   Extended Key Usage:  serverAuth (not critical)
-  Subject Key Id:      1D:33:53:BC:F1:E7:31:96:F9:67:D2:FC:72:0A:F0:96:7D:2F:4C:13
+  Subject Key Id:      80:31:B9:6A:1E:A6:B8:88:63:FC:6C:BF:58:97:4F:67:6D:CD:E0:83
   Authority Key Id:    (not present)
   Subject Alt Name:    DNS:good.example.com (not critical)
 
@@ -24,7 +23,7 @@ Certificate Summary
 [pqc]
   (0 passed, 9 not applicable)
 [cabf_br]
-  (12 passed, 0 not applicable)
+  (24 passed, 0 not applicable)
 [cabf_ev]
   (0 passed, 9 not applicable)
 [hygiene]

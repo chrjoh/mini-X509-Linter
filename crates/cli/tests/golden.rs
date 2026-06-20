@@ -12,9 +12,9 @@
 //! finding embeds the current Unix time (`now is <unix>`), which changes every
 //! run, so fixtures that surface that line (e.g. `expired.pem`) are **never**
 //! snapshotted. The chosen fixtures are stable across runs:
-//! - `good.pem` — auto resolves to tls-server (serverAuth EKU), so its 46 in-profile lints
-//!   (rfc5280 + pqc + cabf_br + cabf_ev + hygiene) all pass / N/A (the five universal pqc lints
-//!   are N/A on this RSA leaf, and the nine cabf_ev lints are EV-only and N/A on this non-EV
+//! - `good.pem` — auto resolves to tls-server (serverAuth EKU), so its 62 in-profile lints
+//!   (rfc5280 16 + pqc 9 + cabf_br 24 + cabf_ev 9 + hygiene 4) all pass / N/A (the universal pqc
+//!   lints are N/A on this RSA leaf, and the nine cabf_ev lints are EV-only and N/A on this non-EV
 //!   leaf); the cabf_cs and cabf_smime lints are out of profile here, so they are not run.
 //! - `cabf_br_validity_400_days.pem` — the only finding is the BR validity error
 //!   whose message embeds a fixed day-count (`400 days`), not a timestamp.

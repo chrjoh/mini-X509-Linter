@@ -1,6 +1,5 @@
 ---
 source: crates/cli/tests/inspect.rs
-assertion_line: 430
 expression: out
 ---
 Certificate 1 (leaf)
@@ -43,12 +42,12 @@ Certificate 1 (leaf)
 [pqc]
   (0 passed, 9 not applicable)
 [cabf_br]
-  (12 passed, 0 not applicable)
+  warn [cabf_br_certificate_policies_present] certificate has no CertificatePolicies extension; CA/Browser Forum BR §7.1.2.7.9 requires it in a subscriber TLS certificate
+  (23 passed, 0 not applicable)
 [cabf_ev]
   (0 passed, 9 not applicable)
 [hygiene]
   (3 passed, 1 not applicable)
-OK: no findings
 
 Certificate 2
 [rfc5280]
@@ -58,7 +57,7 @@ Certificate 2
 [hygiene]
   (3 passed, 1 not applicable)
 OK: no findings
-summary: no findings
+summary: 1 warn
 
 Chain checks:
 (whole chain)

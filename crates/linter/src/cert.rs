@@ -273,6 +273,28 @@ pub struct NamedCurve {
     pub name: Option<String>,
 }
 
+/// A read-only view of an RSA public key's public exponent, expressed as three
+/// pre-computed range predicates rather than a fixed-width integer.
+///
+/// Consumed by the CA/Browser Forum BR `cabf_br_rsa_public_exponent_in_range`
+/// lint (BR §6.1.6), which requires the RSA public exponent to be **odd** and in
+/// the range `[2^16 + 1, 2^256 − 1]` (i.e. ≥ 65537). Because a public exponent
+/// can be arbitrarily large, the predicates are derived from the exponent's
+/// big-endian octet slice by byte arithmetic, never by parsing into a
+/// fixed-width integer; see
+/// [`rsa_public_exponent`](Cert::rsa_public_exponent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RsaExponentView {
+    /// `true` if the exponent is odd (its least-significant octet is odd). An
+    /// empty or all-zero exponent is treated as even.
+    pub is_odd: bool,
+    /// `true` if the exponent's numeric value is ≥ `2^16 + 1` (65537).
+    pub at_least_65537: bool,
+    /// `true` if the exponent's numeric value is ≤ `2^256 − 1`, i.e. it fits in
+    /// at most 32 significant octets (after stripping leading zero octets).
+    pub at_most_2_256_minus_1: bool,
+}
+
 /// A read-only view of the certificate's Authority Key Identifier extension.
 ///
 /// Carries what `ext_authority_key_identifier_no_key_identifier` needs
@@ -1056,6 +1078,38 @@ impl Cert {
     pub fn rsa_modulus_bits(&self) -> Result<Option<u32>, CertError> {
         self.with_parsed(|c| match c.public_key().parsed() {
             Ok(PublicKey::RSA(rsa)) => rsa_modulus_bits(rsa.modulus),
+            _ => None,
+        })
+    }
+
+    /// The RSA public exponent as an [`RsaExponentView`] of range predicates, or
+    /// `None` for non-RSA keys (and for an RSA SPKI that cannot be parsed).
+    ///
+    /// Consumed by `cabf_br_rsa_public_exponent_in_range` (BR §6.1.6), which
+    /// requires the exponent to be odd and in the range `[2^16 + 1, 2^256 − 1]`.
+    /// Uses the SAME parsed-public-key path as
+    /// [`rsa_modulus_bits`](Cert::rsa_modulus_bits) (`x509-parser`'s
+    /// [`PublicKey::RSA`]) and reads the exponent's big-endian octet slice.
+    ///
+    /// The three predicates are computed by **byte arithmetic** so an
+    /// arbitrarily large exponent is handled without parsing into a fixed-width
+    /// integer (a public exponent need not fit in a `u64`):
+    /// - `is_odd` — the least-significant octet is odd; an empty / all-zero
+    ///   exponent is treated as even.
+    /// - `at_least_65537` — after stripping leading zero octets, the value is
+    ///   compared against `[0x01, 0x00, 0x01]` (65537) first by significant-octet
+    ///   length, then lexicographically.
+    /// - `at_most_2_256_minus_1` — after stripping leading zero octets, the value
+    ///   has at most 32 significant octets; `2^256 − 1` is exactly 32 `0xFF`
+    ///   octets, so any value of ≤ 32 significant octets is ≤ `2^256 − 1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CertError::Der`] if the owned DER unexpectedly fails to
+    /// re-parse (it was validated at construction time).
+    pub fn rsa_public_exponent(&self) -> Result<Option<RsaExponentView>, CertError> {
+        self.with_parsed(|c| match c.public_key().parsed() {
+            Ok(PublicKey::RSA(rsa)) => Some(rsa_exponent_view(rsa.exponent)),
             _ => None,
         })
     }
@@ -2334,6 +2388,50 @@ fn rsa_modulus_bits(modulus: &[u8]) -> Option<u32> {
     Some(lower_bits + top_bits)
 }
 
+/// Builds an [`RsaExponentView`] from an RSA public exponent's big-endian octet
+/// slice (the DER INTEGER content octets, which may carry a single sign-padding
+/// leading zero).
+///
+/// All three predicates are computed by byte arithmetic so an arbitrarily large
+/// exponent is handled without parsing into a fixed-width integer:
+/// - `is_odd` from the least-significant octet (empty/all-zero ⇒ even),
+/// - `at_least_65537` by comparing the leading-zero-stripped octets against
+///   `[0x01, 0x00, 0x01]` (length first, then lexicographically),
+/// - `at_most_2_256_minus_1` by checking the stripped octet count is ≤ 32.
+fn rsa_exponent_view(exponent: &[u8]) -> RsaExponentView {
+    // Strip any leading zero octets so length/lexicographic comparisons reflect
+    // the true significant-octet count.
+    let stripped: &[u8] = {
+        let mut s = exponent;
+        while let [0x00, rest @ ..] = s {
+            s = rest;
+        }
+        s
+    };
+
+    // Odd iff the least-significant octet's low bit is set. An empty (all-zero)
+    // exponent has no octets and is treated as even.
+    let is_odd = exponent.last().is_some_and(|&b| b & 1 == 1);
+
+    // 65537 == 0x01_00_01 (three significant octets).
+    const SIXTY_FIVE_FIVE_THIRTY_SEVEN: [u8; 3] = [0x01, 0x00, 0x01];
+    let at_least_65537 = match stripped.len().cmp(&SIXTY_FIVE_FIVE_THIRTY_SEVEN.len()) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => stripped >= &SIXTY_FIVE_FIVE_THIRTY_SEVEN[..],
+    };
+
+    // 2^256 - 1 is exactly 32 0xFF octets, so any value with at most 32
+    // significant octets is <= 2^256 - 1.
+    let at_most_2_256_minus_1 = stripped.len() <= 32;
+
+    RsaExponentView {
+        is_odd,
+        at_least_65537,
+        at_most_2_256_minus_1,
+    }
+}
+
 /// Returns `true` if `bytes` looks like a PEM document.
 fn is_pem(bytes: &[u8]) -> bool {
     let trimmed = trim_ascii_start(bytes);
@@ -2369,6 +2467,139 @@ mod tests {
         #[test]
         fn rejects_der_magic_bytes() {
             assert!(!is_pem(&[0x30, 0x82, 0x01, 0x00]));
+        }
+    }
+
+    mod rsa_exponent {
+        use super::*;
+
+        /// Loads the workspace `testdata/good.pem` fixture (RSA-2048, exp 65537).
+        fn good_cert() -> Cert {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/good.pem");
+            let bytes = std::fs::read(path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        /// Loads a non-RSA fixture (`testdata/pqc_mldsa_good.pem`, an ML-DSA key).
+        fn ml_dsa_cert() -> Cert {
+            let path = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../testdata/pqc_mldsa_good.pem"
+            );
+            let bytes = std::fs::read(path).unwrap();
+            let mut certs = Cert::from_pem(&bytes).unwrap();
+            certs.remove(0)
+        }
+
+        #[test]
+        fn view_for_65537_is_odd_and_in_range() {
+            // 65537 = 0x01_00_01.
+            let view = rsa_exponent_view(&[0x01, 0x00, 0x01]);
+
+            assert_eq!(
+                view,
+                RsaExponentView {
+                    is_odd: true,
+                    at_least_65537: true,
+                    at_most_2_256_minus_1: true,
+                }
+            );
+        }
+
+        #[test]
+        fn view_strips_leading_sign_zero_before_comparing() {
+            // A DER INTEGER may carry one leading 0x00; 65537 stays in range.
+            let view = rsa_exponent_view(&[0x00, 0x01, 0x00, 0x01]);
+
+            assert!(
+                view.at_least_65537,
+                "leading zero must not lift octet count"
+            );
+            assert!(view.is_odd);
+            assert!(view.at_most_2_256_minus_1);
+        }
+
+        #[test]
+        fn view_for_exponent_3_is_odd_but_below_65537() {
+            let view = rsa_exponent_view(&[0x03]);
+
+            assert!(view.is_odd, "3 is odd");
+            assert!(!view.at_least_65537, "3 is below 65537");
+            assert!(view.at_most_2_256_minus_1);
+        }
+
+        #[test]
+        fn view_for_65536_is_even_and_below_65537() {
+            // 65536 = 0x01_00_00, one less than the lower bound and even.
+            let view = rsa_exponent_view(&[0x01, 0x00, 0x00]);
+
+            assert!(!view.is_odd, "65536 is even");
+            assert!(!view.at_least_65537, "65536 is below 65537");
+        }
+
+        #[test]
+        fn view_for_empty_exponent_is_even_and_below_range() {
+            let view = rsa_exponent_view(&[]);
+
+            assert!(!view.is_odd, "an empty exponent is treated as even");
+            assert!(!view.at_least_65537);
+            assert!(view.at_most_2_256_minus_1, "zero significant octets <= 32");
+        }
+
+        #[test]
+        fn view_for_all_zero_exponent_is_even() {
+            let view = rsa_exponent_view(&[0x00, 0x00]);
+
+            assert!(!view.is_odd, "an all-zero exponent is even");
+            assert!(!view.at_least_65537);
+        }
+
+        #[test]
+        fn view_for_32_octet_value_is_within_upper_bound() {
+            // 32 significant 0xFF octets == 2^256 - 1 (the inclusive upper bound).
+            let view = rsa_exponent_view(&[0xFF; 32]);
+
+            assert!(view.at_most_2_256_minus_1, "2^256 - 1 is in range");
+            assert!(view.is_odd);
+            assert!(view.at_least_65537);
+        }
+
+        #[test]
+        fn view_for_33_octet_value_exceeds_upper_bound() {
+            // 33 significant octets is strictly greater than 2^256 - 1.
+            let view = rsa_exponent_view(&[0x01; 33]);
+
+            assert!(
+                !view.at_most_2_256_minus_1,
+                "more than 32 significant octets exceeds 2^256 - 1"
+            );
+        }
+
+        #[test]
+        fn good_cert_exponent_is_65537_and_in_range() {
+            let cert = good_cert();
+
+            let view = cert.rsa_public_exponent().unwrap().unwrap();
+
+            assert_eq!(
+                view,
+                RsaExponentView {
+                    is_odd: true,
+                    at_least_65537: true,
+                    at_most_2_256_minus_1: true,
+                },
+                "good.pem uses RSA exponent 65537"
+            );
+        }
+
+        #[test]
+        fn non_rsa_key_yields_none() {
+            let cert = ml_dsa_cert();
+
+            let exponent = cert.rsa_public_exponent().unwrap();
+
+            assert!(exponent.is_none(), "an ML-DSA key has no RSA exponent");
         }
     }
 
@@ -3023,12 +3254,18 @@ mod tests {
         }
 
         #[test]
-        fn good_cert_has_no_certificate_policy_oids() {
+        fn good_cert_carries_only_the_cabf_dv_reserved_policy_oid() {
             let cert = good_cert();
 
-            // good.pem is a non-EV leaf: no certificatePolicies extension, so it
-            // is not in EV scope.
-            assert!(cert.certificate_policy_oids().unwrap().is_empty());
+            // Feature 17: good.pem was regenerated to carry a certificatePolicies
+            // extension with the CABF reserved DV OID 2.23.140.1.2.1 (so the new
+            // cabf_br_certificate_policies_* lints are positive passes and good.pem
+            // stays finding-free). It is still a non-EV leaf: it carries ONLY the
+            // DV reserved OID, not an EV policy OID.
+            assert_eq!(
+                cert.certificate_policy_oids().unwrap(),
+                vec!["2.23.140.1.2.1".to_string()]
+            );
         }
 
         #[test]

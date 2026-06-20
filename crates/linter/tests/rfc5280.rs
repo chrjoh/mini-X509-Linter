@@ -697,6 +697,13 @@ mod default_registry_over_good {
         // BR sources, so this is purely a raw-registry artifact. That fixture's
         // exact two-rule set is asserted separately in
         // `eku_empty_fixture_trips_new_rule_and_br_serverauth_under_raw_registry`.
+        //
+        // NOTE: `rfc5280_path_len_on_leaf.pem` is ALSO excluded here. A
+        // pathLenConstraint on a CA:FALSE leaf is improper under BOTH the RFC
+        // source (`rfc5280_path_len_constraint_improperly_included`) AND the
+        // feature-17 BR source (`cabf_br_subscriber_basic_constraints_path_len_prohibited`),
+        // so the two co-fire by construction. Its exact two-rule set is asserted
+        // separately in `path_len_on_leaf_fixture_trips_both_rfc_and_br_rules`.
         let cases: &[(&[u8], &str)] = &[
             (CA_SUBJECT_EMPTY_PEM, "rfc5280_ca_subject_field_empty"),
             (
@@ -706,10 +713,6 @@ mod default_registry_over_good {
             (
                 SKI_MISSING_CA_PEM,
                 "rfc5280_ext_subject_key_identifier_missing_ca",
-            ),
-            (
-                PATH_LEN_ON_LEAF_PEM,
-                "rfc5280_path_len_constraint_improperly_included",
             ),
             (
                 NAME_CONSTRAINTS_NOT_CRITICAL_PEM,
@@ -752,12 +755,15 @@ mod default_registry_over_good {
         }
     }
 
-    /// The empty-EKU fixture's documented two-rule case under the RAW registry:
+    /// The empty-EKU fixture's documented multi-rule case under the RAW registry:
     /// it trips the new `rfc5280_ext_key_usage_without_bits` (its target) AND the
-    /// existing broad-scoped `cabf_br_ext_key_usage_server_auth_present` (an empty
-    /// EKU asserts no serverAuth). No other rule fires. The purpose-gated engine
-    /// would not run the BR rule on this non-serverAuth leaf; this asserts the
-    /// raw-registry behaviour explicitly so the overlap is intentional, not silent.
+    /// two broad-scoped BR serverAuth rules: the existing
+    /// `cabf_br_ext_key_usage_server_auth_present` AND the feature-17
+    /// `cabf_br_ext_key_usage_server_auth_required` (an empty EKU is PRESENT but
+    /// asserts no serverAuth, which both rules flag). No other rule fires. The
+    /// purpose-gated engine would resolve this non-serverAuth leaf to `Generic` and
+    /// never run the BR sources; this asserts the raw-registry behaviour explicitly
+    /// so the overlap is intentional, not silent.
     #[test]
     fn eku_empty_fixture_trips_new_rule_and_br_serverauth_under_raw_registry() {
         let registry = default_registry_with_now(Some(TEST_NOW));
@@ -776,18 +782,53 @@ mod default_registry_over_good {
             firing,
             vec![
                 "cabf_br_ext_key_usage_server_auth_present",
+                "cabf_br_ext_key_usage_server_auth_required",
                 "rfc5280_ext_key_usage_without_bits",
             ],
-            "empty-EKU fixture must trip exactly its new rule plus the BR \
-             serverAuth rule under the raw registry; firing lints were {firing:?}"
+            "empty-EKU fixture must trip exactly its new rule plus the two BR \
+             serverAuth rules under the raw registry; firing lints were {firing:?}"
         );
     }
 
-    /// The SKI-missing-sub-cert fixture is the one SHOULD: over the FULL registry
-    /// it surfaces exactly one finding, a `Warn` (not Error/Fatal), from the
-    /// sub-cert SKI lint and nothing else.
+    /// `rfc5280_path_len_on_leaf.pem`'s documented two-rule case: a
+    /// pathLenConstraint on a CA:FALSE leaf is improper under BOTH the RFC source
+    /// (`rfc5280_path_len_constraint_improperly_included`) and the feature-17 BR
+    /// source (`cabf_br_subscriber_basic_constraints_path_len_prohibited`), so over
+    /// the full registry they co-fire by construction and nothing else fires.
     #[test]
-    fn ski_missing_sub_cert_fixture_yields_one_warn() {
+    fn path_len_on_leaf_fixture_trips_both_rfc_and_br_rules() {
+        let registry = default_registry_with_now(Some(TEST_NOW));
+        let cert = load_leaf(PATH_LEN_ON_LEAF_PEM);
+
+        let outcomes = registry.run(&cert);
+
+        let mut firing: Vec<&str> = outcomes
+            .iter()
+            .filter(|o| o.findings.iter().any(|f| f.severity >= Severity::Error))
+            .map(|o| o.lint_id)
+            .collect();
+        firing.sort_unstable();
+
+        assert_eq!(
+            firing,
+            vec![
+                "cabf_br_subscriber_basic_constraints_path_len_prohibited",
+                "rfc5280_path_len_constraint_improperly_included",
+            ],
+            "path-len-on-leaf fixture must trip both the RFC and BR path-len rules; \
+             firing lints were {firing:?}"
+        );
+    }
+
+    /// The SKI-missing-sub-cert fixture is a SHOULD: over the FULL registry it
+    /// surfaces NO Error/Fatal, and exactly TWO `Warn`s — its target
+    /// `rfc5280_ext_subject_key_identifier_missing_sub_cert`, PLUS the feature-17
+    /// `cabf_br_certificate_policies_present` (this compliant leaf carries no
+    /// CertificatePolicies extension, which the BR Warn-severity lint flags on
+    /// every policies-free leaf except the regenerated good.pem). The additive
+    /// BR Warn is reconciled here (documented), not hidden.
+    #[test]
+    fn ski_missing_sub_cert_fixture_yields_only_expected_warns() {
         let registry = default_registry_with_now(Some(TEST_NOW));
         let cert = load_leaf(SKI_MISSING_SUB_CERT_PEM);
 
@@ -804,16 +845,23 @@ mod default_registry_over_good {
             "SKI-missing-sub-cert fixture must produce no Error/Fatal; got {errors:?}"
         );
 
-        // Exactly one Warn, from the sub-cert SKI lint.
-        let warns: Vec<(&str, &linter::Finding)> = outcomes
+        // Exactly two Warns: the sub-cert SKI lint (target) and the BR
+        // certificate-policies-present lint (additive on every policies-free leaf).
+        let mut warns: Vec<&str> = outcomes
             .iter()
             .flat_map(|o| o.findings.iter().map(move |f| (o.lint_id, f)))
             .filter(|(_, f)| f.severity == Severity::Warn)
+            .map(|(id, _)| id)
             .collect();
-        assert_eq!(warns.len(), 1, "expected exactly one Warn; got {warns:?}");
+        warns.sort_unstable();
         assert_eq!(
-            warns[0].0,
-            "rfc5280_ext_subject_key_identifier_missing_sub_cert"
+            warns,
+            vec![
+                "cabf_br_certificate_policies_present",
+                "rfc5280_ext_subject_key_identifier_missing_sub_cert",
+            ],
+            "expected exactly the sub-cert SKI Warn plus the BR policies Warn; \
+             got {warns:?}"
         );
     }
 }

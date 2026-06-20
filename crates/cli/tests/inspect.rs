@@ -507,13 +507,17 @@ mod chain_info {
 
         // The lint report markers and the chain summary line are present. (The
         // feature-15 chain section follows the `summary:` line, so the per-cert
-        // report's `summary: no findings` trailer is no longer the very last line.)
+        // report's `summary:` trailer is no longer the very last line.) Certificate 2
+        // (the CA) is still all-pass, so its `OK: no findings` verdict appears. The
+        // combined report trailer is `summary: 1 warn`: under feature-17's broad BR
+        // scoping the subscriber leaf, which carries no CertificatePolicies extension,
+        // surfaces a single `cabf_br_certificate_policies_present` Warn (no Error).
         assert!(
             out.contains("[rfc5280]") && out.contains("OK: no findings"),
             "the chain lint report must still follow the summaries, got:\n{out}"
         );
         assert!(
-            out.contains("summary: no findings"),
+            out.contains("summary: 1 warn"),
             "the chain lint report's trailing summary line must be present, got:\n{out}"
         );
 
@@ -522,7 +526,7 @@ mod chain_info {
             .rfind("Certificate Summary")
             .expect("a summary block must exist");
         let report_at = out
-            .rfind("summary: no findings")
+            .rfind("summary: 1 warn")
             .expect("the chain report trailer must exist");
         assert!(
             last_summary < report_at,
@@ -846,9 +850,12 @@ mod chain_info {
         );
         // And the full chain lint report still renders below both summaries.
         // (Feature 15 appends a `Chain checks:` section after `summary:`, so the
-        // per-cert report's trailer is present but no longer the final line.)
+        // per-cert report's trailer is present but no longer the final line. The
+        // trailer reads `summary: 1 warn` under feature-17 broad BR scoping: the
+        // subscriber leaf surfaces a single `cabf_br_certificate_policies_present`
+        // Warn for its absent CertificatePolicies extension.)
         assert!(
-            out.contains("summary: no findings"),
+            out.contains("summary: 1 warn"),
             "the full chain lint report must still render after degraded blocks, got:\n{out}"
         );
         // Both certs were summarized: exactly two summary blocks.

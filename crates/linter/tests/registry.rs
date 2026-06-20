@@ -388,9 +388,10 @@ mod default_registry_engine {
         let cert = load_leaf(EXPIRED_PEM);
         let outcomes = registry.run(&cert);
 
-        // Expect: one outcome per registered lint, 70 in total.
-        assert_eq!(registry.len(), 70);
-        assert_eq!(outcomes.len(), 70);
+        // Expect: one outcome per registered lint, 82 in total (feature 17 added
+        // twelve new cabf_br lints, growing the registry 70 -> 82).
+        assert_eq!(registry.len(), 82);
+        assert_eq!(outcomes.len(), 82);
     }
 
     /// (d) The shipped default registry contains the `hygiene_not_expired` lint,
@@ -429,10 +430,17 @@ mod default_registry_engine {
     }
 
     /// Isolation guard for `expired.pem`: run over the FULL shipped registry it
-    /// must produce findings from `hygiene_not_expired` ONLY — that single Warn,
-    /// nothing else. This proves the expired fixture isolates exactly the
-    /// `not_expired` rule end-to-end across rfc5280 + hygiene (the dual of the
-    /// `good.pem` "no Error/Fatal" guard, but pinned to the one expected finding).
+    /// must produce NO Error/Fatal, and the ONLY expiry-related finding must be
+    /// `hygiene_not_expired` (a Warn). This proves the expired fixture isolates
+    /// exactly the `not_expired` rule end-to-end across rfc5280 + hygiene + cabf_br.
+    ///
+    /// Feature-17 reconciliation (documented, NO fixture regeneration): under broad
+    /// BR scoping every non-CA leaf without a CertificatePolicies extension gains an
+    /// additive `cabf_br_certificate_policies_present` Warn. expired.pem is such a
+    /// leaf (only good.pem was regenerated to carry policies), so it now surfaces
+    /// EXACTLY two Warns — its target `hygiene_not_expired` plus that one additive
+    /// BR Warn — and still NO Error. The plan (Cascade-Management §B) explicitly
+    /// predicts this additive Warn on expired.pem and mandates it is not regenerated.
     #[test]
     fn expired_fixture_isolates_only_the_not_expired_finding() {
         // Setup.
@@ -448,15 +456,38 @@ mod default_registry_engine {
             .flat_map(|o| o.findings.iter().map(move |f| (o.lint_id, f)))
             .collect();
 
-        // Expect: exactly one finding overall, from hygiene_not_expired, at Warn.
-        assert_eq!(
-            all_findings.len(),
-            1,
-            "expired.pem must surface exactly one finding across the registry; got {all_findings:?}"
+        // Expect: no Error/Fatal anywhere — expired.pem deviates only by expiry.
+        assert!(
+            all_findings
+                .iter()
+                .all(|(_, f)| f.severity < Severity::Error),
+            "expired.pem must surface no Error/Fatal finding; got {all_findings:?}"
         );
-        let (lint_id, finding) = all_findings[0];
-        assert_eq!(lint_id, "hygiene_not_expired");
-        assert_eq!(finding.severity, Severity::Warn);
+
+        // Expect: exactly the two documented Warns (target expiry + additive BR
+        // policies Warn), sorted by lint_id for a stable assertion.
+        let mut warn_ids: Vec<&str> = all_findings
+            .iter()
+            .filter(|(_, f)| f.severity == Severity::Warn)
+            .map(|(id, _)| *id)
+            .collect();
+        warn_ids.sort_unstable();
+        assert_eq!(
+            warn_ids,
+            vec![
+                "cabf_br_certificate_policies_present",
+                "hygiene_not_expired"
+            ],
+            "expired.pem must surface exactly the expiry Warn plus the additive BR \
+             policies Warn; got {all_findings:?}"
+        );
+
+        // The expiry finding itself is the not_expired lint at Warn.
+        let expiry = all_findings
+            .iter()
+            .find(|(id, _)| *id == "hygiene_not_expired")
+            .expect("expired.pem must trip hygiene_not_expired");
+        assert_eq!(expiry.1.severity, Severity::Warn);
     }
 }
 

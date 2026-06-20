@@ -295,6 +295,18 @@ DELIVERED are future work and are **not yet specced**.
 - **Fuller CA/Browser Forum parity.** The `cabf_br` / `cabf_ev` / `cabf_cs` / `cabf_smime` sources
   ship curated subsets; expand toward fuller zlint parity, appended to the existing sources and
   `applies()`-scoped so existing fixtures don't cascade (the feature-12 pattern).
+  - **`cabf_br` — DELIVERED in feature 17** (`spec/features/17-cabf-br-expansion/`): +12 structurally-
+    decidable BR lints (subscriber KU/EKU/BC prohibitions, SAN composition, certificatePolicies
+    presence + reserved-OID, RSA modulus/exponent rules), taking `cabf_br` from 12 → 24 and the
+    registry from 70 → 82. good.pem was made BR-compliant (pinned key + DV policy OID).
+  - **`cabf_ev` / `cabf_cs` / `cabf_smime` — STILL FUTURE.** Same broad-scoping + cascade discipline;
+    each is its own feature.
+- **Pin all fixture-generation keys (test robustness).** `testdata/generate.sh` re-rolls a shared
+  random key on every run, so re-running it churns every non-`good.pem` fixture's SKI/AKI/signature
+  bytes and breaks SKI-bearing snapshots (the slh_dsa `--info` inspect snapshot) and the README
+  SLH-DSA example. Only `good.pem`'s key is pinned (`testdata/keys/good.key`, feature 17). Pin a
+  committed key per fixture so `bash generate.sh` is byte-reproducible — the natural completion of
+  the feature-16/17 pinned-clock + pinned-good-key direction. Surfaced by the feature-17 review.
 
 ### Robustness & integration
 

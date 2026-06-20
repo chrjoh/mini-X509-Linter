@@ -408,32 +408,36 @@ mod default_registry_isolation {
     use super::*;
 
     /// The positive EV control: `cabf_ev_good.pem` over the FULL registry yields
-    /// no Error/Fatal findings — every EV lint applies and passes, and the
-    /// BR/RFC/hygiene lints pass too.
+    /// exactly ONE Error — the feature-17 BR lint
+    /// `cabf_br_certificate_policies_reserved_oid`. Every EV fixture's
+    /// certificatePolicies carries only the synthetic EV marker OID
+    /// `1.3.6.1.4.1.99999.1.1` (a placeholder, NOT a CABF reserved OID
+    /// `2.23.140.1.2.{1,2,3}`), so the broad-scoped BR reserved-OID lint correctly
+    /// flags it. This is a genuine, correct new finding from the feature-17
+    /// expansion (NOT an EV-fixture defect): the EV fixtures are out of feature
+    /// 17's scope and are not regenerated, so the BR reserved-OID lint legitimately
+    /// co-fires on them. Every EV lint still applies and passes, and the rest of
+    /// the BR/RFC/hygiene lints stay quiet.
     #[test]
-    fn ev_good_yields_no_error_or_fatal_findings() {
-        let registry = default_registry_with_now(Some(TEST_NOW));
-        let cert = load_leaf(EV_GOOD_PEM);
-        let outcomes = registry.run(&cert);
-
-        let bad: Vec<(&str, &linter::Finding)> = outcomes
-            .iter()
-            .flat_map(|o| o.findings.iter().map(move |f| (o.lint_id, f)))
-            .filter(|(_, f)| f.severity >= Severity::Error)
-            .collect();
-
-        assert!(
-            bad.is_empty(),
-            "cabf_ev_good.pem must pass the whole registry; got {bad:?}"
+    fn ev_good_yields_only_the_br_reserved_policy_oid_error() {
+        assert_eq!(
+            firing_error_lints(EV_GOOD_PEM),
+            vec!["cabf_br_certificate_policies_reserved_oid"],
+            "cabf_ev_good.pem carries a non-reserved EV marker policy OID, so only \
+             the feature-17 BR reserved-OID lint fires"
         );
     }
 
     /// Each single-rule EV fixture, run over the FULL registry, surfaces exactly
-    /// its one EV rule and no other Error/Fatal finding — proving the EV fixtures
-    /// isolate exactly one rule and that the BR/RFC/hygiene lints stay quiet on
-    /// EV fixtures. The two-rule validity fixture is asserted separately below.
+    /// its one EV rule PLUS the feature-17 BR `cabf_br_certificate_policies_reserved_oid`
+    /// — proving the EV deviation isolates exactly one EV rule. The BR reserved-OID
+    /// lint co-fires on every EV fixture because their certificatePolicies carries
+    /// only the synthetic EV marker OID (not a CABF reserved OID); see
+    /// `ev_good_yields_only_the_br_reserved_policy_oid_error` for the rationale. The
+    /// two-rule validity fixture (which adds a SECOND BR rule) is asserted
+    /// separately below. `firing_error_lints` returns sorted ids.
     #[test]
-    fn each_single_rule_ev_fixture_isolates_exactly_one_violation() {
+    fn each_single_rule_ev_fixture_isolates_exactly_one_ev_violation() {
         let cases: &[(&[u8], &str)] = &[
             (EV_ORG_NAME_MISSING_PEM, "cabf_ev_organization_name_missing"),
             (
@@ -457,24 +461,33 @@ mod default_registry_isolation {
             (EV_ORG_ID_MISSING_PEM, "cabf_ev_organization_id_present"),
         ];
 
-        for (pem, expected_lint) in cases {
+        for (pem, expected_ev_lint) in cases {
+            let mut expected = vec![
+                "cabf_br_certificate_policies_reserved_oid",
+                *expected_ev_lint,
+            ];
+            expected.sort_unstable();
             assert_eq!(
                 firing_error_lints(pem),
-                vec![*expected_lint],
-                "fixture for {expected_lint} must violate exactly that rule"
+                expected,
+                "fixture for {expected_ev_lint} must violate exactly that EV rule \
+                 (plus the BR reserved-OID lint that co-fires on every EV fixture)"
             );
         }
     }
 
-    /// `cabf_ev_validity_400_days.pem` — DOCUMENTED two-rule fixture. A 400-day EV
+    /// `cabf_ev_validity_400_days.pem` — DOCUMENTED multi-rule fixture. A 400-day EV
     /// leaf exceeds BOTH the EV and the BR 398-day validity ceiling (both are
-    /// 398d), so over the full registry it fires exactly that pair and nothing
-    /// else (one BR rule, one EV rule).
+    /// 398d), and like every EV fixture it also trips the feature-17 BR
+    /// `cabf_br_certificate_policies_reserved_oid` (synthetic EV marker OID is not a
+    /// CABF reserved OID). Over the full registry it fires exactly those three and
+    /// nothing else. `firing_error_lints` returns sorted ids.
     #[test]
-    fn validity_400_fixture_trips_both_br_and_ev_validity_rules() {
+    fn validity_400_fixture_trips_both_validity_rules_and_the_br_policy_oid() {
         assert_eq!(
             firing_error_lints(EV_VALIDITY_400_PEM),
             vec![
+                "cabf_br_certificate_policies_reserved_oid",
                 "cabf_br_validity_max_398_days",
                 "cabf_ev_validity_max_398_days",
             ]

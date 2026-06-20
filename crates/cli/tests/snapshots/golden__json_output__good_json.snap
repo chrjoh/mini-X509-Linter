@@ -250,6 +250,78 @@ expression: value
     "source": "cabf_br"
   },
   {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_subscriber_key_usage_cert_sign_prohibited",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_subscriber_key_usage_crl_sign_prohibited",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_subscriber_basic_constraints_path_len_prohibited",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_ext_key_usage_any_prohibited",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_ext_key_usage_server_auth_required",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_san_dns_or_ip_only",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_san_present",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_certificate_policies_present",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_certificate_policies_reserved_oid",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_rsa_modulus_bits_multiple_of_8",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_rsa_public_exponent_in_range",
+    "source": "cabf_br"
+  },
+  {
+    "applicability": "applies",
+    "findings": [],
+    "lint_id": "cabf_br_basic_constraints_present",
+    "source": "cabf_br"
+  },
+  {
     "applicability": "not_applicable",
     "findings": [],
     "lint_id": "cabf_ev_organization_name_missing",

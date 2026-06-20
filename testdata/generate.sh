@@ -152,6 +152,24 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY="$(mktemp)"
 openssl genrsa -out "$KEY" 2048 2>/dev/null
 
+# good.pem's key is PINNED (feature 17): a fixed, committed RSA-2048 key at
+# testdata/keys/good.key. good.pem is signed from THIS key (not the re-rolled
+# $KEY above), so good.pem's SubjectKeyIdentifier / serial / signature bytes are
+# byte-stable across regenerations and ONLY the certificatePolicies extension
+# added in feature 17 changes good.pem. good.pem is self-signed, so a dedicated
+# key affects no other fixture. The key was generated ONCE and committed; it must
+# NOT be re-rolled here. If it is ever missing, recreate it ONCE with
+#   openssl genrsa -out testdata/keys/good.key 2048
+# and commit it (do NOT regenerate it on subsequent runs — that would re-roll the
+# SKI/signature and defeat the pin).
+GOOD_KEY="$HERE/keys/good.key"
+if [[ ! -f "$GOOD_KEY" ]]; then
+  echo "ERROR: pinned good.pem key missing: $GOOD_KEY" >&2
+  echo "       create it ONCE with: openssl genrsa -out $GOOD_KEY 2048" >&2
+  echo "       then commit it (it must NOT be re-rolled on regen)." >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Validity windows (UTC, openssl 1.1.1+/3.x flags).
 # ---------------------------------------------------------------------------
@@ -263,10 +281,29 @@ trap cleanup EXIT
 # ===========================================================================
 
 # good.pem: clean BR-compliant leaf — v3, CN=good.example.com, SAN DNS = CN,
-# serverAuth, CA:FALSE, RSA-2048/SHA-256, BR_OK window. Passes all 14 lints.
+# serverAuth, CA:FALSE, RSA-2048/SHA-256, BR_OK window. Passes every shipped lint.
+#
+# Feature 17: good.pem now ALSO carries a certificatePolicies extension with the
+# CABF reserved DV policy OID 2.23.140.1.2.1, so the new
+# cabf_br_certificate_policies_present (lint 8) and
+# cabf_br_certificate_policies_reserved_oid (lint 9) lints are POSITIVE passes and
+# good.pem stays completely finding-free. good.pem is signed from the PINNED
+# $GOOD_KEY (not the re-rolled $KEY) so its SKI/serial/signature are byte-stable
+# and only this certificatePolicies line moves good.pem's bytes.
 EXT_GOOD="$(new_ext)"
-make_leaf_ext "$EXT_GOOD" "DNS:good.example.com"
-sign_csr "$HERE/good.pem" "/CN=good.example.com" 17 "$BR_OK_NB" "$BR_OK_NA" "$EXT_GOOD"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:good.example.com\n'
+  printf 'certificatePolicies=2.23.140.1.2.1\n'
+} >"$EXT_GOOD"
+GOOD_CSR="$(mktemp)"
+openssl req -new -key "$GOOD_KEY" -subj "/CN=good.example.com" -out "$GOOD_CSR" 2>/dev/null
+openssl x509 -req -in "$GOOD_CSR" -signkey "$GOOD_KEY" -out "$HERE/good.pem" \
+  -set_serial 17 -not_before "$BR_OK_NB" -not_after "$BR_OK_NA" -sha256 \
+  -extfile "$EXT_GOOD" 2>/dev/null
+rm -f "$GOOD_CSR"
+echo "wrote $HERE/good.pem (PINNED key + certificatePolicies DV OID 2.23.140.1.2.1)"
 
 # expired.pem: BR-compliant leaf shape but PAST <=398d window — isolates ONLY
 # hygiene_not_expired.
@@ -736,6 +773,290 @@ EXT_COUNTRY_ISO="$(new_ext)"
 make_leaf_ext "$EXT_COUNTRY_ISO" "DNS:country-iso.example.com"
 sign_csr "$HERE/cabf_br_country_not_iso.pem" "/C=ZZ/CN=country-iso.example.com" 77 \
   "$BR_OK_NB" "$BR_OK_NA" "$EXT_COUNTRY_ISO"
+
+# ===========================================================================
+# Feature 17: CA/Browser Forum BR depth-expansion per-lint violating fixtures
+# ===========================================================================
+#
+# Twelve more BR lints (the registry now ships 82 lints overall; cabf_br holds
+# 24). Each fixture below is a BR-compliant leaf EXCEPT its one NEW target rule
+# and fires no OLD rule across the FULL 82-lint registry, with TWO documented
+# intentional co-fires (asserted as two-rule cases in crates/linter/tests/cabf_br.rs):
+#   - cabf_br_leaf_path_len.pem  (a pathLenConstraint on a CA:FALSE leaf trips
+#     BOTH the new BR-scoped cabf_br_subscriber_basic_constraints_path_len_prohibited
+#     AND the feature-12 rfc5280_path_len_constraint_improperly_included by
+#     construction — pathLen on a non-CA-with-keyCertSign leaf is improper under
+#     both sources)
+#   - cabf_br_eku_no_server_auth.pem  (an EKU asserting clientAuth only trips BOTH
+#     the new cabf_br_ext_key_usage_server_auth_required AND the existing
+#     cabf_br_ext_key_usage_server_auth_present — no serverAuth purpose is asserted)
+#
+# All leaves reuse the BR_OK window, RSA-2048/SHA-256, CA:FALSE, a compliant
+# public DNS:<cn> SAN entry (so cabf_br_cn_in_san stays quiet and the names are
+# not internal/reserved), unless the single target forces deviating from exactly
+# one of those. Serials 80..91.
+
+# cabf_br_subscriber_key_usage_cert_sign_prohibited: leaf KeyUsage asserts
+# keyCertSign (a CA-only bit) alongside digitalSignature. CA:FALSE keeps it a
+# subscriber cert; serverAuth + compliant SAN keep the other BR lints quiet.
+EXT_KU_CERTSIGN="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:ku-cert-sign.example.com\n'
+  printf 'keyUsage=digitalSignature,keyCertSign\n'
+} >"$EXT_KU_CERTSIGN"
+sign_csr "$HERE/cabf_br_ku_cert_sign.pem" "/CN=ku-cert-sign.example.com" 80 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_KU_CERTSIGN"
+
+# cabf_br_subscriber_key_usage_crl_sign_prohibited: leaf KeyUsage asserts cRLSign
+# (a CA-only bit) alongside digitalSignature. CA:FALSE.
+EXT_KU_CRLSIGN="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:ku-crl-sign.example.com\n'
+  printf 'keyUsage=digitalSignature,cRLSign\n'
+} >"$EXT_KU_CRLSIGN"
+sign_csr "$HERE/cabf_br_ku_crl_sign.pem" "/CN=ku-crl-sign.example.com" 81 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_KU_CRLSIGN"
+
+# cabf_br_subscriber_basic_constraints_path_len_prohibited: leaf with a
+# pathLenConstraint while CA:FALSE — meaningful only on a keyCertSign CA, so it is
+# improper on a subscriber. openssl accepts CA:FALSE,pathlen:0 directly. DOCUMENTED
+# two-rule co-fire: this also trips the feature-12
+# rfc5280_path_len_constraint_improperly_included by construction (pathLen on a
+# non-CA-with-keyCertSign leaf is improper under both the BR and RFC sources). The
+# integration test asserts that exact pair.
+EXT_LEAF_PATHLEN="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE,pathlen:0\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:leaf-path-len.example.com\n'
+} >"$EXT_LEAF_PATHLEN"
+sign_csr "$HERE/cabf_br_leaf_path_len.pem" "/CN=leaf-path-len.example.com" 82 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_LEAF_PATHLEN"
+
+# cabf_br_ext_key_usage_any_prohibited: EKU = serverAuth + anyExtendedKeyUsage
+# (the prohibited 2.5.29.37.0). serverAuth kept so the server-auth lints stay
+# quiet; only the any-EKU rule fires.
+EXT_EKU_ANY="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth,anyExtendedKeyUsage\n'
+  printf 'subjectAltName=DNS:eku-any.example.com\n'
+} >"$EXT_EKU_ANY"
+sign_csr "$HERE/cabf_br_eku_any.pem" "/CN=eku-any.example.com" 83 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_EKU_ANY"
+
+# cabf_br_ext_key_usage_server_auth_required: EKU present (clientAuth only) with NO
+# serverAuth. DOCUMENTED two-rule co-fire: this fixture also trips the EXISTING
+# cabf_br_ext_key_usage_server_auth_present (no serverAuth purpose is asserted), so
+# the integration test asserts that exact pair. This is lint 5's
+# single-rule-vs-existing isolating fixture (the existing cabf_br_missing_serverauth.pem
+# isolation test is reconciled to the same two-rule assertion).
+EXT_EKU_NOSA="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=clientAuth\n'
+  printf 'subjectAltName=DNS:eku-no-server-auth.example.com\n'
+} >"$EXT_EKU_NOSA"
+sign_csr "$HERE/cabf_br_eku_no_server_auth.pem" "/CN=eku-no-server-auth.example.com" 84 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_EKU_NOSA"
+
+# cabf_br_san_dns_or_ip_only: SAN = compliant DNS:<cn> + TWO prohibited entries (a
+# rfc822Name and a URI). Only the DNS-or-IP-only rule fires (the DNS:<cn> keeps
+# cn_in_san quiet), but it yields TWO findings (one per offending entry) — the
+# multi-finding case. The reserved.rs classifier is not tripped: example.com is a
+# public name and neither prohibited entry is a dNSName/iPAddress it inspects.
+EXT_SAN_EMAIL="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:san-email.example.com,email:a@example.com,URI:https://san.example.com/\n'
+} >"$EXT_SAN_EMAIL"
+sign_csr "$HERE/cabf_br_san_email_entry.pem" "/CN=san-email.example.com" 85 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_SAN_EMAIL"
+
+# cabf_br_san_present (Warn): leaf with NO SAN but a NON-EMPTY subject DN, else
+# compliant. cabf_br_san_present fires a Warn; rfc5280_san_present_if_subject_empty
+# stays quiet because the subject is non-empty. The subject uses /O= (NO CN) so
+# cabf_br_cn_in_san stays quiet — a CN with no SAN would otherwise trip cn_in_san
+# (the CN cannot be present in a non-existent SAN). serverAuth kept so the
+# server-auth lints stay quiet. This fixture fires EXACTLY one new Warn and no
+# Error across the full registry.
+EXT_NO_SAN="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+} >"$EXT_NO_SAN"
+sign_csr "$HERE/cabf_br_no_san.pem" "/O=No SAN Org" 86 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_NO_SAN"
+
+# cabf_br_certificate_policies_present (Warn): leaf with NO CertificatePolicies
+# extension, else compliant. Fires a Warn from cabf_br_certificate_policies_present.
+# (good.pem now CARRIES certificatePolicies, so this dedicated fixture is what
+# asserts the Warn cleanly; cabf_br_certificate_policies_reserved_oid stays quiet
+# because the extension is ABSENT.)
+EXT_NO_POLICIES="$(new_ext)"
+make_leaf_ext "$EXT_NO_POLICIES" "DNS:no-policies.example.com"
+sign_csr "$HERE/cabf_br_no_policies.pem" "/CN=no-policies.example.com" 87 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_NO_POLICIES"
+
+# cabf_br_certificate_policies_reserved_oid: CertificatePolicies PRESENT with a
+# single NON-reserved OID (1.3.6.1.4.1.99999.1). cabf_br_certificate_policies_present
+# stays quiet (the extension is present); only the reserved-OID rule fires.
+EXT_POLICIES_NORES="$(new_ext)"
+{
+  printf 'basicConstraints=CA:FALSE\n'
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:policies-no-reserved.example.com\n'
+  printf 'certificatePolicies=1.3.6.1.4.1.99999.1\n'
+} >"$EXT_POLICIES_NORES"
+sign_csr "$HERE/cabf_br_policies_no_reserved.pem" "/CN=policies-no-reserved.example.com" 88 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_POLICIES_NORES"
+
+# cabf_br_rsa_modulus_bits_multiple_of_8: an RSA modulus whose bit length is NOT a
+# multiple of 8. openssl RSA keygen always yields byte-aligned moduli (the top
+# octet has its high bit set, so an N-bit key has exactly N significant bits), so
+# the non-octet-aligned modulus is produced by a DER patch: mint a 2056-bit key,
+# CLEAR the high bit of the modulus's most-significant content octet AND drop the
+# now-redundant 0x00 DER sign octet (x509-parser requires minimal INTEGER
+# encoding, so the sign octet must be removed once the top bit is clear). That
+# yields a strictly-minimal 2055-bit modulus INTEGER (2055 % 8 == 7 != 0). The
+# removal shortens the INTEGER by one octet, so every enclosing definite-length
+# header (the RSAPublicKey SEQUENCE, the subjectPublicKey BIT STRING, the
+# SubjectPublicKeyInfo SEQUENCE, the TBSCertificate SEQUENCE, and the outer
+# Certificate SEQUENCE) is recomputed via an ancestor-length walk. 2056 (not 2048)
+# is chosen so the patched length 2055 stays >= 2048 and the floor lint
+# hygiene_rsa_key_min_2048 (2048-bit minimum) stays quiet — ONLY the
+# octet-alignment lint fires. The signature no longer matches, which is irrelevant
+# — the linter parses structure, it does not verify signatures.
+BR_RSA_MOD_KEY="$(mktemp)"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2056 -out "$BR_RSA_MOD_KEY" 2>/dev/null
+EXT_RSA_MOD="$(new_ext)"
+make_leaf_ext "$EXT_RSA_MOD" "DNS:rsa-mod-not-oct.example.com"
+BR_RSA_MOD_CSR="$(mktemp)"
+BR_RSA_MOD_V3="$(mktemp)"
+BR_RSA_MOD_DER="$(mktemp)"
+openssl req -new -key "$BR_RSA_MOD_KEY" -subj "/CN=rsa-mod-not-oct.example.com" \
+  -out "$BR_RSA_MOD_CSR" 2>/dev/null
+openssl x509 -req -in "$BR_RSA_MOD_CSR" -signkey "$BR_RSA_MOD_KEY" \
+  -out "$BR_RSA_MOD_V3" \
+  -set_serial 89 -not_before "$BR_OK_NB" -not_after "$BR_OK_NA" -sha256 \
+  -extfile "$EXT_RSA_MOD" 2>/dev/null
+openssl x509 -in "$BR_RSA_MOD_V3" -outform DER -out "$BR_RSA_MOD_DER"
+python3 - "$BR_RSA_MOD_DER" <<'PY'
+import sys
+
+def read_len(b, i):
+    f = b[i]; i += 1
+    if f < 0x80:
+        return f, i
+    n = f & 0x7f
+    return int.from_bytes(b[i:i + n], 'big'), i + n
+
+path = sys.argv[1]
+orig = bytearray(open(path, "rb").read())
+# 2056-bit modulus => 258 content octets (1 sign zero + 257 value octets),
+# encoded as INTEGER tag 02, length 0x82 0x01 0x02, then 0x00 sign octet, then the
+# 0xNN top value octet (high bit set).
+marker = bytes.fromhex("0282010200")  # 02 82 01 02 00
+i = orig.find(marker)
+if i < 0:
+    sys.exit("ERROR: could not locate 2056-bit RSA modulus INTEGER to patch")
+int_tag = i                 # offset of the INTEGER tag (0x02)
+sign_off = i + len(marker) - 1   # offset of the 0x00 sign octet
+msb_off = sign_off + 1           # the true most-significant value octet
+if orig[msb_off] & 0x80 == 0:
+    sys.exit("ERROR: modulus top octet high bit already clear; unexpected key shape")
+
+# Clear the high bit (2056 -> 2055 significant bits), then DELETE the now-redundant
+# 0x00 sign octet so the INTEGER is minimally encoded (x509-parser requires this).
+patched_msb = orig[msb_off] & 0x7F
+vstart = sign_off  # the byte we will remove
+
+# Find every enclosing ancestor header whose content range contains vstart. We
+# recurse into CONSTRUCTED nodes and, specially, into the subjectPublicKey BIT
+# STRING (tag 0x03, primitive) whose content is "unused-bits octet (0x00) followed
+# by the DER-encoded RSAPublicKey SEQUENCE". Every such ancestor's definite length
+# shrinks by one octet when the sign byte is removed.
+ancestors = []
+
+def rec(start, end):
+    j = start
+    while j < end:
+        tag = orig[j]
+        ln, c = read_len(orig, j + 1)
+        e = c + ln
+        if c <= vstart < e:
+            if tag & 0x20:  # constructed (SEQUENCE / SET / explicit tags)
+                ancestors.append(j)
+                rec(c, e)
+            elif tag == 0x03:  # BIT STRING: descend past the unused-bits octet
+                ancestors.append(j)
+                rec(c + 1, e)
+        j = e
+
+rec(0, len(orig))
+
+delta = -1  # we remove exactly one octet (the sign byte)
+
+# Build the new buffer: copy through, replacing the MSB value and dropping the
+# sign octet. Order in memory: ... 02 82 01 02 | 00(sign) | NN(msb) ...
+# Remove the sign octet (at sign_off) and write the patched MSB in its place.
+data = bytearray(orig[:sign_off] + bytes([patched_msb]) + orig[msb_off + 1:])
+
+def bump(b, hdr):
+    f = b[hdr + 1]
+    if f < 0x80:
+        b[hdr + 1] = (f + delta) & 0xff
+    else:
+        n = f & 0x7f
+        v = int.from_bytes(b[hdr + 2:hdr + 2 + n], 'big') + delta
+        b[hdr + 2:hdr + 2 + n] = v.to_bytes(n, 'big')
+
+# The INTEGER's own definite length (0x82 0x01 0x02 -> 0x82 0x01 0x01).
+bump(data, int_tag)
+# Every constructed ancestor (SEQUENCEs / BIT STRING) shrinks by one octet too.
+for a in sorted(set(ancestors)):
+    bump(data, a)
+
+open(path, "wb").write(data)
+PY
+openssl x509 -inform DER -in "$BR_RSA_MOD_DER" -outform PEM \
+  -out "$HERE/cabf_br_rsa_mod_not_oct.pem"
+echo "wrote $HERE/cabf_br_rsa_mod_not_oct.pem (RSA modulus -> 2055 bits, not octet-aligned)"
+rm -f "$BR_RSA_MOD_CSR" "$BR_RSA_MOD_V3" "$BR_RSA_MOD_DER" "$BR_RSA_MOD_KEY"
+
+# cabf_br_rsa_public_exponent_in_range: RSA-2048 key with public exponent 3
+# (< 65537), else compliant. Only the exponent-range rule fires.
+BR_RSA_EXP_KEY="$(mktemp)"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -pkeyopt rsa_keygen_pubexp:3 \
+  -out "$BR_RSA_EXP_KEY" 2>/dev/null
+EXT_RSA_EXP="$(new_ext)"
+make_leaf_ext "$EXT_RSA_EXP" "DNS:rsa-exp-3.example.com"
+BR_RSA_EXP_CSR="$(mktemp)"
+openssl req -new -key "$BR_RSA_EXP_KEY" -subj "/CN=rsa-exp-3.example.com" \
+  -out "$BR_RSA_EXP_CSR" 2>/dev/null
+openssl x509 -req -in "$BR_RSA_EXP_CSR" -signkey "$BR_RSA_EXP_KEY" \
+  -out "$HERE/cabf_br_rsa_exp_3.pem" \
+  -set_serial 90 -not_before "$BR_OK_NB" -not_after "$BR_OK_NA" -sha256 \
+  -extfile "$EXT_RSA_EXP" 2>/dev/null
+rm -f "$BR_RSA_EXP_CSR" "$BR_RSA_EXP_KEY"
+echo "wrote $HERE/cabf_br_rsa_exp_3.pem (RSA-2048, public exponent 3)"
+
+# cabf_br_basic_constraints_present (Warn): leaf with NO BasicConstraints
+# extension, else compliant. Fires a Warn from cabf_br_basic_constraints_present.
+# Omitting BasicConstraints trips no rfc5280 rule (the RFC BC rules apply to CAs;
+# a leaf without BC is structurally fine). serverAuth + SAN keep the rest quiet.
+EXT_NO_BC="$(new_ext)"
+{
+  printf 'extendedKeyUsage=serverAuth\n'
+  printf 'subjectAltName=DNS:no-basic-constraints.example.com\n'
+} >"$EXT_NO_BC"
+sign_csr "$HERE/cabf_br_no_basic_constraints.pem" "/CN=no-basic-constraints.example.com" 91 \
+  "$BR_OK_NB" "$BR_OK_NA" "$EXT_NO_BC"
 
 # ===========================================================================
 # Feature 10: CA/Browser Forum S/MIME Baseline Requirements fixtures

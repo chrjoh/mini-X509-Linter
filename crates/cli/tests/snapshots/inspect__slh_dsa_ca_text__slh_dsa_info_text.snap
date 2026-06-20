@@ -1,6 +1,5 @@
 ---
 source: crates/cli/tests/inspect.rs
-assertion_line: 154
 expression: out
 ---
 Certificate Summary
@@ -15,8 +14,8 @@ Certificate Summary
   Basic Constraints:   CA:true (critical)
   Key Usage:           Certificate Sign, CRL Sign (critical)
   Extended Key Usage:  (not present)
-  Subject Key Id:      3C:B2:20:74:AC:49:56:3D:94:72:6C:9A:22:9A:66:DD:51:70:10:01
-  Authority Key Id:    3C:B2:20:74:AC:49:56:3D:94:72:6C:9A:22:9A:66:DD:51:70:10:01
+  Subject Key Id:      AB:2E:29:C6:D1:3F:AE:A1:93:8A:60:C8:2D:1E:84:87:0F:F2:E7:3D
+  Authority Key Id:    AB:2E:29:C6:D1:3F:AE:A1:93:8A:60:C8:2D:1E:84:87:0F:F2:E7:3D
   Subject Alt Name:    DNS:slh-dsa-test-root (not critical)
 
 [rfc5280]

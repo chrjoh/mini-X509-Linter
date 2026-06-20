@@ -8,9 +8,10 @@ expression: out
   (0 passed, 9 not applicable)
 [cabf_br]
   error [cabf_br_validity_max_398_days] validity window is 400 days; CA/Browser Forum BR §6.3.2 allows at most 398 days for a subscriber certificate
-  (11 passed, 0 not applicable)
+  warn [cabf_br_certificate_policies_present] certificate has no CertificatePolicies extension; CA/Browser Forum BR §7.1.2.7.9 requires it in a subscriber TLS certificate
+  (22 passed, 0 not applicable)
 [cabf_ev]
   (0 passed, 9 not applicable)
 [hygiene]
   (3 passed, 1 not applicable)
-summary: 1 error
+summary: 1 error, 1 warn

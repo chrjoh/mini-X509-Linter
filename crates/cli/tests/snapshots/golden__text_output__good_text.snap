@@ -7,7 +7,7 @@ expression: out
 [pqc]
   (0 passed, 9 not applicable)
 [cabf_br]
-  (12 passed, 0 not applicable)
+  (24 passed, 0 not applicable)
 [cabf_ev]
   (0 passed, 9 not applicable)
 [hygiene]

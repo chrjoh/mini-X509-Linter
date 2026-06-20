@@ -31,17 +31,29 @@ purpose: tls-server (auto)
   n/a   pqc_signature_parameters_absent
   n/a   pqc_spki_parameters_absent
 [cabf_br]
+  pass  cabf_br_basic_constraints_present
+  pass  cabf_br_certificate_policies_present
+  pass  cabf_br_certificate_policies_reserved_oid
   pass  cabf_br_cn_in_san
   pass  cabf_br_dnsname_bad_character_in_label
   pass  cabf_br_dnsname_label_too_long
   pass  cabf_br_dnsname_underscore_in_sld
   pass  cabf_br_dnsname_wildcard_left_of_public_suffix
+  pass  cabf_br_ext_key_usage_any_prohibited
   pass  cabf_br_ext_key_usage_server_auth_present
+  pass  cabf_br_ext_key_usage_server_auth_required
   pass  cabf_br_extra_subject_common_names
   pass  cabf_br_no_internal_names_or_reserved_ip
   pass  cabf_br_organizational_unit_name_prohibited
+  pass  cabf_br_rsa_modulus_bits_multiple_of_8
+  pass  cabf_br_rsa_public_exponent_in_range
+  pass  cabf_br_san_dns_or_ip_only
+  pass  cabf_br_san_present
   pass  cabf_br_subject_contains_reserved_ip
   pass  cabf_br_subject_country_not_iso
+  pass  cabf_br_subscriber_basic_constraints_path_len_prohibited
+  pass  cabf_br_subscriber_key_usage_cert_sign_prohibited
+  pass  cabf_br_subscriber_key_usage_crl_sign_prohibited
   pass  cabf_br_validity_max_398_days
 [cabf_ev]
   n/a   cabf_ev_business_category_invalid

@@ -56,6 +56,18 @@ mod organizational_unit_name_prohibited;
 mod subject_contains_reserved_ip;
 mod subject_country_not_iso;
 
+// Feature 17: BR depth-expansion lints (all broad-scoped, RuleSource::CabfBr).
+mod basic_constraints_present;
+mod certificate_policies;
+mod ext_key_usage_any_prohibited;
+mod ext_key_usage_server_auth_required;
+mod rsa_modulus_bits_multiple_of_8;
+mod rsa_public_exponent_in_range;
+mod san_dns_or_ip_only;
+mod san_present;
+mod subscriber_basic_constraints_path_len_prohibited;
+mod subscriber_key_usage_prohibited;
+
 pub use cn_in_san::CnInSan;
 pub use ext_key_usage_server_auth_present::ExtKeyUsageServerAuthPresent;
 pub use no_internal_names_or_reserved_ip::NoInternalNamesOrReservedIp;
@@ -69,6 +81,19 @@ pub use extra_subject_common_names::ExtraSubjectCommonNames;
 pub use organizational_unit_name_prohibited::OrganizationalUnitNameProhibited;
 pub use subject_contains_reserved_ip::SubjectContainsReservedIp;
 pub use subject_country_not_iso::SubjectCountryNotIso;
+
+pub use basic_constraints_present::BasicConstraintsPresent;
+pub use certificate_policies::{CertificatePoliciesPresent, CertificatePoliciesReservedOid};
+pub use ext_key_usage_any_prohibited::ExtKeyUsageAnyProhibited;
+pub use ext_key_usage_server_auth_required::ExtKeyUsageServerAuthRequired;
+pub use rsa_modulus_bits_multiple_of_8::RsaModulusBitsMultipleOf8;
+pub use rsa_public_exponent_in_range::RsaPublicExponentInRange;
+pub use san_dns_or_ip_only::SanDnsOrIpOnly;
+pub use san_present::SanPresent;
+pub use subscriber_basic_constraints_path_len_prohibited::SubscriberBasicConstraintsPathLenProhibited;
+pub use subscriber_key_usage_prohibited::{
+    SubscriberKeyUsageCertSignProhibited, SubscriberKeyUsageCrlSignProhibited,
+};
 
 use crate::Applicability;
 use crate::cert::Cert;
